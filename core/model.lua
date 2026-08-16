@@ -50,6 +50,8 @@ local function u32(b,p) return b[p]+b[p+1]*256+b[p+2]*65536+b[p+3]*16777216, p+4
 local function i32(b,p) local v; v,p = u32(b,p); if v >= 2147483648 then v = v - 4294967296 end; return v,p end
 
 function ExtBank:ParsePacket(hex)
+	-- `< 8` and not `< 10` is deliberate, and mirrors extBank.lua:59 exactly.
+	-- See docs/non-issues.md §1 before "fixing" it.
 	if type(hex) ~= 'string' or #hex < 8 then return end
 
 	local b, n = {}, 0
@@ -64,6 +66,8 @@ function ExtBank:ParsePacket(hex)
 	ub,    p = u8(b, p)
 	nBags, p = u8(b, p)
 
+	-- Both the bag records and `ub` being consumed only here -- and not for
+	-- kind ~= 0 -- mirrors extBank.lua:63-79. See docs/non-issues.md §2.
 	if kind == 0 then -- full snapshot
 		ClearModel(self)
 		self.unlockedBags = ub

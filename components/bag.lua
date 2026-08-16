@@ -72,17 +72,23 @@ end
 -- Left-click: drop a carried bag to equip here, or (on an equipped slot)
 -- toggle its contents on/off in the shared grid. Right-click: unequip
 -- (server enforces that the bag has to be empty first).
+--
+-- CheckButtons on 'anyUp': the client flips the checked state before this
+-- runs, so every path has to reach the UpdateChecked() below or the slot is
+-- left glowing as "contents shown" when it isn't. Core Bagnon's own
+-- Bag:OnClick ends the same way, with UpdateShown().
 function Bag:OnClick(button)
-	if self:IsLocked() then return end
-	if self:DropCarriedBag() then return end
-
-	if button == 'RightButton' then
-		if self:IsEquipped() then
-			ExtBank:UnequipBag(self.bagIndex)
+	if not self:IsLocked() and not self:DropCarriedBag() then
+		if button == 'RightButton' then
+			if self:IsEquipped() then
+				ExtBank:UnequipBag(self.bagIndex)
+			end
+		elseif self:IsEquipped() then
+			self:GetSettings():ToggleBagSlot(self.bagIndex)
 		end
-	elseif self:IsEquipped() then
-		self:GetSettings():ToggleBagSlot(self.bagIndex)
 	end
+
+	self:UpdateChecked()
 end
 
 function Bag:OnReceiveDrag()

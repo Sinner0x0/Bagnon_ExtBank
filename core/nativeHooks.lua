@@ -120,5 +120,8 @@ function ExtBank:HideNativeWindow()
 		nativeSide:Hide()
 	end
 
+	-- Set unconditionally, and deliberately NOT moved inside `if nativeSide`:
+	-- BuildUI creates both native frames or neither, and re-entering would
+	-- stack a second hook on the main frame. See docs/non-issues.md §3.
 	nativeWindowHooked = true
 end

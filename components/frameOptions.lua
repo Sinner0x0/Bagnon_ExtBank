@@ -21,6 +21,9 @@ local Bagnon = LibStub('AceAddon-3.0'):GetAddon('Bagnon')
 -- Bagnon_Config is LoadOnDemand: it may not exist yet when this file runs
 -- (it only loads when the player actually opens it), so the patch has to
 -- wait for that instead of running immediately.
+-- Waiting on the event alone is enough -- no IsAddOnLoaded fallback is
+-- needed, because 3.3.5a never re-loads a LoD addon across /reload, so
+-- ADDON_LOADED cannot already have fired. See docs/non-issues.md §4.
 local watcher = CreateFrame('Frame')
 watcher:RegisterEvent('ADDON_LOADED')
 watcher:SetScript('OnEvent', function(self, event, addonName)
