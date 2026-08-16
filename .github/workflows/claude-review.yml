@@ -8,6 +8,17 @@ on:
 permissions:
   contents: read
   pull-requests: write
+
+  # Required, and not optional the way the name suggests: the action does not
+  # use GITHUB_TOKEN directly. It requests an OIDC token from the runner and
+  # exchanges it for a scoped GitHub token of its own. Without this scope the
+  # runner never sets ACTIONS_ID_TOKEN_REQUEST_URL, so the request fails before
+  # any review work starts -- "Unable to get ACTIONS_ID_TOKEN_REQUEST_URL env
+  # variable", retried three times and then fatal. Note that naming any
+  # `permissions:` key at all drops every scope not listed to `none`, so this
+  # has to be spelled out here even though the default token would have had it.
+  id-token: write
+
   # `issues: read` is the minimum this needs today — the action reads linked
   # issues for context on the PR.
   #
