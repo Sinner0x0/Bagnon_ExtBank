@@ -1,0 +1,18 @@
+#!/bin/sh
+#
+# Refuses to push commits whose Bagnon_ExtBank.toc and main.lua disagree about
+# the version or the date.
+#
+# With pre-commit installed this should never fire. It is here for the commits
+# that got past it -- `git commit --no-verify`, a GUI client that ignores
+# core.hooksPath, a cherry-pick from before the hooks existed -- and it is the
+# same check CI runs on the pull request, just early enough that the fix is a
+# local amend rather than a red build.
+#
+# It only checks. Fixing here would be pointless: the push contents are already
+# decided by the time this runs (see .githooks/pre-commit).
+set -e
+
+root="$(git rev-parse --show-toplevel)"
+
+bash "$root/.github/scripts/stamp-version.sh" --check

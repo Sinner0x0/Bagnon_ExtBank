@@ -1,0 +1,59 @@
+# Bagnon_ExtBank — the addon folder ships as-is into Interface/AddOns, so
+# anything ignored here is a local dev artifact, never part of a release.
+
+# --- Packaging output -------------------------------------------------------
+# .github/scripts/build.sh stages the shipped files into build/ and writes the
+# finished archive to dist/.
+build/
+dist/
+
+# BigWigsMods/packager (release.sh, the WoW Packager GitHub Action) builds into
+# .release/ and stages libraries into .install/. Not currently used — this
+# addon embeds no libraries and has no CurseForge/WoWInterface/Wago presence,
+# which is all the packager would buy. Kept ignored in case that changes.
+.release/
+.install/
+
+# Hand-rolled distribution archives.
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+
+# --- Editors / IDEs ---------------------------------------------------------
+.vscode/
+.vs/
+.idea/
+*.iml
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# --- OS cruft ---------------------------------------------------------------
+.DS_Store
+._*
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# --- Lua tooling ------------------------------------------------------------
+# luacheck cache and luacov output. .luacheckrc / .luarc.json are config and
+# stay tracked; only their generated artifacts are ignored.
+.luacheckcache
+luacov.stats.out
+luacov.report.out
+
+# --- Local / in-game artifacts ----------------------------------------------
+# Editing in place under Interface/AddOns leaves these behind; the client also
+# writes SavedVariables and Cache next to a live install.
+WTF/
+Cache/
+*.toc.bak
+*.lua.bak
+*.bak
+*.orig
+*.rej

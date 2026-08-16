@@ -1,0 +1,13 @@
+# Shell scripts must keep LF endings. Checked out with CRLF on Windows and
+# committed that way, bash on the CI runner fails with "\r: command not found".
+*.sh text eol=lf
+
+# The git hooks are shell scripts too -- they just have no extension, so the
+# rule above misses them. Same failure, and it would bite on this machine
+# rather than on CI: a CRLF hook aborts every commit.
+.githooks/* text eol=lf
+
+# The README screenshots. git detects binary content on its own, so this is
+# belt-and-braces -- but core.autocrlf is on here, and a PNG that ever gets
+# treated as text comes out of a checkout corrupted.
+*.png binary
