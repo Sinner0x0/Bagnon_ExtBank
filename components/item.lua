@@ -424,7 +424,9 @@ end
 -- Shown when the client has no cached item data for an itemId yet -- a cold
 -- login, mostly. See docs/non-issues.md §5: this server does not answer bulk item
 -- queries, so it is a real and unfixable-from-Lua state rather than a transient
--- one, and the icon may resolve at any point afterwards or never.
+-- one, and the icon may resolve at any point afterwards or never. Hovering the
+-- cell is what resolves it when anything does -- SetTooltipItem's single-item
+-- query (components/widget.lua) repaints icon and tooltip when it answers.
 local UNKNOWN_ITEM_TEXTURE = [[Interface\Icons\INV_Misc_QuestionMark]]
 
 -- ReloadAllItemSlots calls this for every already-built cell on the page -- up to
@@ -595,7 +597,15 @@ function ItemSlot:RefreshTooltip()
 	-- not just the first 7 the native vault UI truncates to -- belt and
 	-- suspenders alongside the ContainerFrameItemButtonTemplate/self.slot
 	-- fixes above.
-	GameTooltip:SetHyperlink(('item:%d:%d:0:0:0:0:%d:0:0'):format(
+	--
+	-- Through SetTooltipItem (components/widget.lua), not a bare SetHyperlink:
+	-- on a first hover the client's item cache may not have this id yet, and
+	-- SetHyperlink then renders an empty or name-only tooltip nothing ever
+	-- refreshes. SetTooltipItem shows a "Retrieving item information"
+	-- placeholder instead and rebuilds this tooltip when the server's answer
+	-- lands. The stack line below appends either way -- the count comes from
+	-- the packet, not the item cache.
+	self:SetTooltipItem(data.itemId, ('item:%d:%d:0:0:0:0:%d:0:0'):format(
 		data.itemId, data.enchant or 0, data.randomProp or 0))
 
 	if data.count and data.count > 1 then
@@ -632,7 +642,7 @@ function ItemSlot:GetCellData()
 end
 
 
--- SetFrameID/GetFrameID/GetSettings, plus the tooltip trio -- this class hovers,
+-- SetFrameID/GetFrameID/GetSettings, plus the tooltip methods -- this class hovers,
 -- so it opts into the second half.
 Bagnon.ExtBankWidget:Apply(ItemSlot)
 Bagnon.ExtBankWidget:ApplyTooltip(ItemSlot)

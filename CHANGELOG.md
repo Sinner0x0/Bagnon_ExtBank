@@ -7,10 +7,6 @@ and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The version in `Bagnon_ExtBank.toc` is the source of truth — bumping it is what
 publishes a release, so the entry below it should land in the same change.
 
-## [Unreleased]
-
-Nothing yet.
-
 ## [1.0.0] — 2026-08-17
 
 First release. Replaces ProjectEbonhold's built-in Void Storage window with a

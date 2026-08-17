@@ -156,7 +156,8 @@ local EMPTY_BAG_TEXTURE = [[Interface\PaperDoll\UI-PaperDoll-Slot-Bag]]
 -- Drawn when the client has no cached item data for the equipped container yet, the
 -- same placeholder components/item.lua uses for content cells. See
 -- docs/non-issues.md §5: this server does not answer bulk item queries, so it is a
--- real state that can resolve later or never.
+-- real state that can resolve later or never -- hovering the slot is what asks for
+-- the one id and repaints it (SetTooltipItem, components/widget.lua).
 local UNKNOWN_ITEM_TEXTURE = [[Interface\Icons\INV_Misc_QuestionMark]]
 
 function Bag:Update()
@@ -268,7 +269,11 @@ function Bag:RefreshTooltip()
 
 	local data = self:GetBagData()
 	if data then
-		GameTooltip:SetHyperlink('item:' .. data.itemId)
+		-- Through SetTooltipItem (components/widget.lua), not a bare
+		-- SetHyperlink -- same first-hover cache miss as the content cells;
+		-- see ItemSlot:RefreshTooltip. The two hint lines come from the
+		-- model, not the item cache, so they hold under the placeholder too.
+		self:SetTooltipItem(data.itemId, 'item:' .. data.itemId)
 		GameTooltip:AddLine('Click to show/hide its contents below', 0.6, 0.6, 0.6)
 		GameTooltip:AddLine('Right-click to unequip (must be empty)', 0.6, 0.6, 0.6)
 	else
@@ -295,7 +300,7 @@ function Bag:IsLocked()
 end
 
 
--- SetFrameID/GetFrameID/GetSettings, plus the tooltip trio -- this class hovers,
+-- SetFrameID/GetFrameID/GetSettings, plus the tooltip methods -- this class hovers,
 -- so it opts into the second half.
 Bagnon.ExtBankWidget:Apply(Bag)
 Bagnon.ExtBankWidget:ApplyTooltip(Bag)

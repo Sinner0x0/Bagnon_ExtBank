@@ -231,7 +231,7 @@ end
 -- (components/widget.lua). GetSettings comes with them and is unused here --
 -- harmless, so it is not worth splitting the identity methods up per class.
 --
--- The tooltip trio is a separate ApplyTooltip and is deliberately NOT taken: this
+-- The tooltip methods are a separate ApplyTooltip and are deliberately NOT taken: this
 -- bar has no RefreshTooltip, so RefreshTooltipIfOwned would be a method that could
 -- only ever error. That is the line between the two halves -- an unused accessor is
 -- harmless, an uncallable method is a trap.

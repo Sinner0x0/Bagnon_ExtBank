@@ -264,6 +264,18 @@ And there is nothing to retry against: 3.3.5a has no `GET_ITEM_INFO_RECEIVED`. A
 retry would be re-issuing exactly the queries the server is already declining, on a timer,
 for every cell in the vault.
 
+**Scoped 2026-08-17 — the hovered cell is the one exception, and it does not reopen this
+entry.** A first hover was already sending a *single-item* query (the side effect of
+`SetHyperlink`), and the server does answer those — a second hover of the same item has
+always shown a complete tooltip. What was broken was purely client-side rendering order:
+the tooltip drew from the cache before the answer landed, and nothing redrew it after.
+`SetTooltipItem` (`components/widget.lua`) now shows a "Retrieving item information"
+placeholder and watches the local cache — one query per hover, no re-asking, a 5s cap —
+then rebuilds the tooltip and the icon together. What stays out of reach is exactly what
+this entry describes: *bulk* resolution, borders and icons for every cell at once,
+unprompted by a hover. The queries it needs are the ones the server declines, and
+partial resolution across the grid is still the failure mode for the border feature.
+
 Note the two symptoms are one cause. A fix for the `?` icons is a fix for the border and
 vice versa; neither can be done without the other, and neither can be done from Lua.
 
