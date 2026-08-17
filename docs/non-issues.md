@@ -508,3 +508,66 @@ whose occupant has contents, or the round-trip UX becomes a real complaint rathe
 than a theoretical one.
 
 *Investigated in-game 2026-08-17.*
+
+---
+
+## 12. `ItemSlot:Update`'s cache is not dropped when the button is rebound
+
+**Where:** [`components/item.lua`](../components/item.lua) — `ItemSlot:SetSlot`, and the
+`shownTexture`/`shownCount`/… cache in `ItemSlot:Update`.
+
+**What gets flagged.** Item buttons are pooled: `Free()` hides one and puts it back,
+`Restore()` hands it to a completely different `(bagIndex, slot)`, and `SetSlot`
+rebinds it. `Update` keeps a five-field cache and early-outs when nothing changed —
+so rebinding a button without clearing that cache looks like a textbook stale-render
+bug, and "clear the cache in `SetSlot`" looks like the obvious one-line fix. It was
+in fact written that way first, then removed.
+
+**Why it stays.** The cache is only ever assigned immediately before the two writes
+it guards, and those two lines are **the only thing in the addon that paints an item
+button** — the template's own `OnEvent`/`OnUpdate` are nil'd in `Create`, and nothing
+else calls `SetItemButtonTexture`/`SetItemButtonCount`. So the cache describes *this
+button's pixels*, not the cell it happens to be bound to, and `Free`/`Restore`/
+`SetSlot` repaint nothing. A rebound button therefore either resolves to something
+different — a miss, and it is redrawn — or to exactly what it is already showing, in
+which case skipping the write is correct.
+
+Verified by mutation rather than by reading: deleting the invalidation changes no
+observable behaviour, because a rebind that *matters* always differs in at least one
+keyed field. Adding it back asserts a hazard that does not exist and invites the next
+reader to preserve it.
+
+**Reopen if:** anything other than `ItemSlot:Update` gains the ability to paint an
+item button — a second `SetItemButtonTexture` call site, a restored template script,
+or a Blizzard handler re-attached to these buttons. Then the cache stops describing
+the pixels and needs a real invalidation point.
+
+---
+
+## 13. The in-vault pick is still not on the cursor
+
+**Where:** [`core/cursor.lua`](../core/cursor.lua) — `ExtBank.pickSrc`, `SetPick`, `ClearPick`.
+
+**What gets flagged.** A left-click on a vault cell arms a "virtual pick" that puts
+nothing on the real cursor, so the player is mid-gesture with no cursor payload. The
+obvious complaint is that this is invisible state, and the obvious fix is to put the
+item on the cursor properly.
+
+**Why it stays.** There is nothing to put it on. Bag `20 + b` is not a container the
+client API recognises, so `PickupContainerItem` cannot be called for a vault cell and
+`CursorHasItem()` will never report one — which is the whole reason the virtual pick
+exists. Cursor payloads are not something Lua can synthesise on 3.3.5a.
+
+What *was* addressed is the consequence rather than the cause: the origin cell now
+carries a highlight for as long as a pick is outstanding (`ItemSlot:UpdatePicked`,
+driven by `EXTBANK_PICK_CHANGED`), a right-click always means "withdraw" instead of
+being spent completing a forgotten move, and the pick is cleared by the bag strip,
+the page bar and the mouse wheel as well as by the cell paths and `Frame:OnHide`. So
+the state is visible and short-lived even though it is not on the cursor.
+
+**Reopen if:** a client-side way to load the cursor from a non-container address
+appears, or the highlight proves insufficient in practice — a player reporting a move
+they did not intend would be the signal, and the fix would be to require the second
+click on the *same* cell to confirm rather than to complete.
+
+*Entries 12 and 13 dispositioned 2026-08-17 alongside the correctness pass.*
