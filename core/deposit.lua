@@ -324,24 +324,46 @@ end
 --      the server DOES receive and refuse ("No free slot accepts that item"),
 --      leaving the item sitting in the bag -- still locked.
 --
--- So the lock is orphaned client state. Nothing in Lua can release it: it
--- lives in the client's own item data, not the UI, which is also why
--- GetContainerItemInfo reports it and why /reload does NOT clear it -- a
--- reload restarts the Lua VM but never re-requests item data. Only a full
--- relog does, since that rebuilds every item from the server.
+-- So the lock is orphaned client state, and it lives in the client's own item
+-- data rather than in the UI -- which is why GetContainerItemInfo reports it,
+-- and why /reload does NOT clear it: a reload restarts the Lua VM but never
+-- re-requests item data.
 --
--- But releasing the lock is not the only way out, and this is what the
--- warning message tells the player to do first: make the vault able to accept
--- the item (equip a bag, or free a slot) and right-click it AGAIN. The lock
--- is still never released -- it just stops mattering, because extBank.lua's
--- post-hook fires a second ExtBankMove, the server accepts this one, and the
--- item is removed from the bag server-side. An empty slot has nothing left to
--- keep locked. Note the item ends up in the VAULT, not restored in place.
+-- What DOES clear it is the server writing that slot again. Nothing in Lua can
+-- ask for that directly, but it falls out of any real inventory change the
+-- server accepts, and a full relog is only the blunt instance of it (every slot
+-- rebuilt at once). Observed in-game, and the shape of the observation is what
+-- pins the rule down to the SLOT: with two items stuck at the same time,
+-- withdrawing ore from the vault un-stuck the stuck ore and left the stuck
+-- potion greyed. The ore came back into the stack that was already stuck, so
+-- that one slot got rewritten and no other did -- and withdrawing into a
+-- different bag entirely, where nothing merges, leaves the greyed item greyed.
+--
+-- Not settled, and left that way on purpose since nothing depends on it: this
+-- can't yet distinguish "the server rewrote that slot" from "the client
+-- refreshed every slot holding that item ID". The test that separates them is
+-- to get a FULL stack stuck (nothing can merge into it) and then withdraw the
+-- same item, forcing it into a fresh slot -- still greyed means the rule is
+-- per-slot as written above.
+--
+-- Either way this is not a recovery route worth telling players about. It needs
+-- the stuck item to be stackable, a matching stack sitting in the vault, room
+-- left in the stuck stack, and the server's autostore to pick that stack over
+-- any other -- four conditions, each of which fails silently.
+--
+-- The route the warning message DOES give is unconditional: make the vault able
+-- to accept the item (equip a bag, or free a slot) and right-click it AGAIN.
+-- The lock is never released there -- it just stops mattering, because
+-- extBank.lua's post-hook fires a second ExtBankMove, the server accepts this
+-- one, and the item is removed from the bag server-side. An empty slot has
+-- nothing left to keep locked. Note the item ends up in the VAULT, not restored
+-- in place. Confirmed in-game rather than merely reasoned: a greyed item
+-- right-clicks into the vault normally once there is room for it.
 --
 -- Verified dead ends, so they don't get re-tried later: ExtBankMove'ing the
 -- item onto its own slot, and ExtBankMove'ing it to the first free live
 -- inventory slot (dstBag 0xFE), both leave it greyed -- consistent with the
--- above, since neither one actually gets the item out of the bag. Preventing
+-- above, since neither one gets the server to write the slot. Preventing
 -- the lock in the first place would mean stopping UseContainerItem from
 -- running at all, i.e. replacing a Blizzard API global -- out of scope.
 --
