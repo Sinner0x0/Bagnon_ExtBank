@@ -358,17 +358,76 @@ end
 
 --[[ Update Methods ]]--
 
+-- Shown when the client has no cached item data for an itemId yet -- a cold
+-- login, mostly. See docs/non-issues.md §5: this server does not answer bulk item
+-- queries, so it is a real and unfixable-from-Lua state rather than a transient
+-- one, and the icon may resolve at any point afterwards or never.
+local UNKNOWN_ITEM_TEXTURE = [[Interface\Icons\INV_Misc_QuestionMark]]
+
+-- ReloadAllItemSlots calls this for every already-built cell on the page -- up to
+-- GetBagsPerPage() x 36, 180 by default -- on every EXTBANK_MODEL_UPDATED, while a
+-- delta packet typically touches one or two cells. So all but a couple of those
+-- calls were rewriting byte-identical state: a texture, a count, a search re-run
+-- and a GameTooltip:IsOwned probe each. components/bag.lua's Bag:Update has cached
+-- against exactly this for the strip; this is the higher-volume path.
+--
+-- The cache is keyed on the RESOLVED values about to be written, not on the cell's
+-- own fields, and that distinction is the whole reason it is safe:
+--
+--   * GetItemIcon reads the client's item cache, so for one itemId it can answer
+--     nil now (-> UNKNOWN_ITEM_TEXTURE) and the real path later. Keyed on itemId,
+--     this would pin the question mark for the rest of the session.
+--   * GetEmptyItemTexture reads a live addon-wide setting, and
+--     SHOW_EMPTY_ITEM_SLOT_TEXTURE_UPDATE (components/itemFrame.lua) applies a
+--     change to it by calling plain Update() on every cell -- there is nothing
+--     narrower for it to call. Keyed on cell data, that handler would become a
+--     no-op and the setting would silently stop taking effect until the window was
+--     reopened, which is the bug it was added to fix.
+--
+-- Keyed on the output, both of those are ordinary cache misses and need no special
+-- case. itemId/enchant/randomProp ride along because RefreshTooltip's text is a
+-- function of them and not of the icon: two different items can share an icon, and
+-- an in-place enchant change would not move it.
+--
+-- UpdateSearch is inside the guard too. Its other input is the search string,
+-- which has its own message (TEXT_SEARCH_UPDATE) calling UpdateSearch directly and
+-- bypassing this cache -- and when late item data does arrive, the texture change
+-- lands us here anyway, so the search filter re-evaluates with it.
+--
+-- Pooling needs no invalidation hook, which is worth stating because the opposite
+-- looks obviously necessary. These five fields are only ever assigned immediately
+-- before the two writes below, and those two lines are the only thing in the addon
+-- that paints an item button (the template's own OnEvent/OnUpdate are nil'd in
+-- Create). So the cache describes THIS BUTTON'S PIXELS, not the cell it is bound
+-- to, and Free/Restore/SetSlot repaint nothing -- a rebound button either resolves
+-- to something different (a miss, so it is redrawn) or to exactly what it is
+-- already showing (a skip, which is correct). Clearing the cache in SetSlot would
+-- be defending against nothing.
 function ItemSlot:Update()
 	if not self:IsVisible() then return end
 
 	local data = self:GetCellData()
+	local texture, count, itemId, enchant, randomProp
 	if data then
-		SetItemButtonTexture(self, GetItemIcon(data.itemId) or [[Interface\Icons\INV_Misc_QuestionMark]])
-		SetItemButtonCount(self, data.count)
+		itemId, count = data.itemId, data.count
+		enchant, randomProp = data.enchant, data.randomProp
+		texture = GetItemIcon(itemId) or UNKNOWN_ITEM_TEXTURE
 	else
-		SetItemButtonTexture(self, self:GetEmptyItemTexture())
-		SetItemButtonCount(self, 0)
+		count = 0
+		texture = self:GetEmptyItemTexture()
 	end
+
+	if self.shownCount == count and self.shownTexture == texture
+		and self.shownItemId == itemId and self.shownEnchant == enchant
+		and self.shownRandomProp == randomProp then
+		return
+	end
+
+	self.shownCount, self.shownTexture = count, texture
+	self.shownItemId, self.shownEnchant, self.shownRandomProp = itemId, enchant, randomProp
+
+	SetItemButtonTexture(self, texture)
+	SetItemButtonCount(self, count)
 
 	self:UpdateSearch()
 	self:RefreshTooltipIfOwned()
@@ -388,15 +447,32 @@ end
 -- search, same as core Bagnon/Bagnon_GuildBank's own item slots.
 -- `search` is passed in by ItemFrame:TEXT_SEARCH_UPDATE, which reads it once for
 -- the whole grid; omitted (the Update() path) it's looked up here.
-function ItemSlot:UpdateSearch(search)
+--
+-- `matches` is that same caller's per-pass itemId -> boolean memo (see its comment
+-- for why it must not outlive one pass). Optional: the Update() path passes none
+-- and computes directly, which is fine now that Update only reaches here when the
+-- cell actually changed. Stored as a real boolean either way, so `nil` keeps
+-- meaning "not computed yet" and a genuine non-match still memoizes.
+function ItemSlot:UpdateSearch(search, matches)
 	if search == nil then
 		search = Bagnon.Settings:GetTextSearch()
 	end
 
 	local shouldFade = false
 	if search ~= nil and search ~= '' then
-		local link = self:GetSearchLink()
-		shouldFade = not (link and ItemSearch:Find(link, search))
+		local data = self:GetCellData()
+		local itemId = data and data.itemId
+		local match = matches and itemId and matches[itemId]
+
+		if match == nil then
+			local link = self:GetSearchLink()
+			match = (link and ItemSearch:Find(link, search)) and true or false
+			if matches and itemId then
+				matches[itemId] = match
+			end
+		end
+
+		shouldFade = not match
 	end
 
 	self:SetAlpha(shouldFade and 0.4 or 1)

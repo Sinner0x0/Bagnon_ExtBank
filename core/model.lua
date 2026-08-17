@@ -93,7 +93,16 @@ function ExtBank:ParsePacket(hex)
 	--
 	-- Only built when a deposit is actually in flight; otherwise the answer is
 	-- thrown away, so nothing is allocated.
-	local watchingDeposits = self:HasPendingDeposits() > 0
+	--
+	-- Read ONCE and carried to CorrectPendingDeposit below, which used to re-derive
+	-- it for itself. That is not just a saved call: HasPendingDeposits sweeps the
+	-- pending list against DEPOSIT_RESPONSE_WINDOW and compacts it in place, so it
+	-- was real mutation running twice for one packet on a path core/deposit.lua's
+	-- own header calls hot. Nothing between here and there can change the answer --
+	-- the cell loop never arms a deposit, and GetTime() is fixed for the whole
+	-- frame, so no arm can age out midway.
+	local arms = self:HasPendingDeposits()
+	local watchingDeposits = arms > 0
 	local previousCells = self.cells
 	local gained, nGained = nil, 0
 	if watchingDeposits then gained = {} end
@@ -167,7 +176,7 @@ function ExtBank:ParsePacket(hex)
 	-- turns a snapshot taken right before a real-inventory deposit click into
 	-- an actual page-aware relocation, now that the cells above reflect
 	-- whatever the server just did in response.
-	self:CorrectPendingDeposit(gained)
+	self:CorrectPendingDeposit(gained, arms)
 
 	-- NOT self:SendMessage -- that's AceEvent-3.0's own message bus (mixed
 	-- into this module via NewModule(..., 'AceEvent-3.0')), a completely

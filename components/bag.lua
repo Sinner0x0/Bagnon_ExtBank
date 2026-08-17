@@ -182,8 +182,29 @@ function Bag:Update()
 	self:RefreshTooltipIfOwned()
 end
 
+-- `not IsBagSlotHidden`, not `IsBagSlotShown`, because the two are equivalent
+-- here and only one of them is O(1). Core's IsBagSlotShown
+-- (Bagnon/components/frameSettings.lua) answers by walking GetVisibleBagSlots(),
+-- whose iterator re-fetches GetDB():GetBags() and calls IsBagSlotHidden again on
+-- every step -- so it means "in GetBags() AND not hidden". IsBagSlotHidden is
+-- just `not GetDB():IsBagShown(slot)`: three calls and one table index.
+--
+-- Core pays the scan over <= 12 bag slots. This frame seeds availableBags with
+-- all 70 (components/savedFrameSettings.lua), so finding index k cost k+1
+-- iterator steps and a HIDDEN bag cost a full 70-step scan that never matched --
+-- times 70 buttons, on every packet, and deliberately outside Update's own
+-- shownLocked/shownItemId cache below since OnClick and OnSlotShownChanged reach
+-- here directly.
+--
+-- The two predicates differ only for a slot outside GetBags(), and this frame has
+-- none: GetDefaultExtBankSettings fills availableBags with every index
+-- 0..MAX_BAGS-1, and BagFrame:CreateBagSlots only ever builds buttons for that
+-- same range. That is the invariant this line depends on -- if availableBags ever
+-- becomes a proper subset of the buttons built, they stop agreeing. (Reverse Slot
+-- Order is safe either way: it flips the iterator's direction, not its
+-- membership.)
 function Bag:UpdateChecked()
-	self:SetChecked(self:IsEquipped() and self:GetSettings():IsBagSlotShown(self.bagIndex))
+	self:SetChecked(self:IsEquipped() and not self:GetSettings():IsBagSlotHidden(self.bagIndex))
 end
 
 -- Deliberately NOT named UpdateTooltip, for the same reason item.lua's cell

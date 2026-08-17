@@ -150,10 +150,22 @@ end
 -- The search string is read once here and handed down, rather than each cell
 -- fetching it for itself: this fires on every KEYSTROKE and loops every live
 -- cell, so a full page was 180 Settings lookups per character typed.
+-- `matches` memoizes ItemSearch:Find by itemId for the duration of this one pass.
+-- The answer depends only on (itemId, search) and a page holds far fewer distinct
+-- items than cells, so this collapses up to 180 Find calls -- each one ~2
+-- GetItemInfo plus ~10 pattern matches down inside LibItemSearch -- to one per
+-- distinct item.
+--
+-- Deliberately a fresh table per pass rather than a field kept across them: Find's
+-- answer runs through GetItemInfo, which can start resolving mid-session, so a
+-- longer-lived memo would latch a miss taken while the item was still uncached --
+-- the same way a cached icon lookup would latch a question-mark placeholder. Do
+-- not "optimize" this into a persistent cache.
 function ItemFrame:TEXT_SEARCH_UPDATE()
 	local search = Bagnon.Settings:GetTextSearch()
+	local matches = {}
 	for _, itemSlot in pairs(self.itemSlots) do
-		itemSlot:UpdateSearch(search)
+		itemSlot:UpdateSearch(search, matches)
 	end
 end
 

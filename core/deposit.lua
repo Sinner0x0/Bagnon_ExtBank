@@ -246,8 +246,12 @@ end
 -- deposit lands on-page. That only loosens the snapshot bound slightly, and it
 -- fails in the safe direction -- unlike spending arms on echoes, which drops
 -- real corrections on the floor.
-function ExtBank:CorrectPendingDeposit(gained)
-	local arms = self:HasPendingDeposits()
+-- `arms` is the live arm count, passed in by ParsePacket rather than re-derived
+-- here: HasPendingDeposits sweeps and compacts the pending list in place, so
+-- calling it again would run that mutation a second time for one packet. See the
+-- comment at its call site in core/model.lua for why the value is still valid by
+-- the time we get it.
+function ExtBank:CorrectPendingDeposit(gained, arms)
 	if arms == 0 or not gained then return end
 
 	-- ParsePacket calls us BEFORE it broadcasts EXTBANK_MODEL_UPDATED, so the
