@@ -94,6 +94,14 @@ end
 -- left glowing as "contents shown" when it isn't. Core Bagnon's own
 -- Bag:OnClick ends the same way, with UpdateShown().
 function Bag:OnClick(button)
+	-- Clicking the strip ends any outstanding in-vault pick. Toggling a bag's
+	-- contents re-flows the grid, and unequipping one removes cells outright, so a
+	-- pick armed before this click would complete itself onto a cell the player
+	-- never aimed at -- with no cue that it was still armed. The strip used to
+	-- ignore pickSrc entirely, which is what made an accidental left-click on a cell
+	-- survive arbitrarily long.
+	ExtBank:ClearPick()
+
 	if not self:IsLocked() and not self:DropCarriedBag() then
 		if button == 'RightButton' then
 			if self:IsEquipped() then
@@ -121,8 +129,11 @@ function Bag:DropCarriedBag()
 	if not CursorHasItem() then return false end
 
 	local src = ExtBank:GetVerifiedCursorSource()
-	if src then
-		ExtBank:EquipBagToSlot(src.bag, src.slot, self.bagIndex)
+	if src and ExtBank:EquipBagToSlot(src.bag, src.slot, self.bagIndex) then
+		-- Same rule as the content cells' own drop (components/item.lua): the cursor
+		-- is only released once the request has actually gone out, so a client that
+		-- is not answering leaves the bag in hand rather than silently dropping it
+		-- back as though it had been equipped.
 		ClearCursor()
 		ExtBank.cursorSrc = nil
 	end
@@ -142,6 +153,12 @@ end
 
 local EMPTY_BAG_TEXTURE = [[Interface\PaperDoll\UI-PaperDoll-Slot-Bag]]
 
+-- Drawn when the client has no cached item data for the equipped container yet, the
+-- same placeholder components/item.lua uses for content cells. See
+-- docs/non-issues.md §5: this server does not answer bulk item queries, so it is a
+-- real state that can resolve later or never.
+local UNKNOWN_ITEM_TEXTURE = [[Interface\Icons\INV_Misc_QuestionMark]]
+
 function Bag:Update()
 	local locked = self:IsLocked()
 	local data = (not locked) and self:GetBagData() or nil
@@ -150,11 +167,7 @@ function Bag:Update()
 	-- The checked ring is driven on its own, outside the cache below, because
 	-- OnClick and OnSlotShownChanged both reach UpdateChecked directly --
 	-- folding it into the cached state would let those two paths desync it.
-	if locked then
-		self:SetChecked(false)
-	else
-		self:UpdateChecked()
-	end
+	self:UpdateChecked()
 
 	-- Everything past here is the icon and alpha work, and that is what
 	-- actually costs something: all 70 buttons run this on every
@@ -162,20 +175,35 @@ function Bag:Update()
 	-- were rewriting the same constant texture, the same desaturation and the
 	-- same alpha every single packet. The tooltip refresh belongs on this side
 	-- of the check too -- its text is a function of exactly these two values.
-	if self.shownLocked == locked and self.shownItemId == itemId then
+	--
+	-- The RESOLVED texture is part of the key, not just (locked, itemId), and that
+	-- is what keeps the cache honest. GetItemIcon reads the client's item cache,
+	-- which on a cold login answers nil for an item it has not seen -- the button
+	-- draws the question mark, and seconds later the same itemId would answer with
+	-- the real path. Keyed on itemId alone the early-out swallowed that: the `?`
+	-- was pinned for the rest of the session, un-fixable by toggling the strip
+	-- (OnHide does not clear this) or by reopening the window, only by /reload.
+	-- Meanwhile the content grid re-resolved on every packet and drew correctly, so
+	-- the player got permanent `?` bag icons above a correct grid. Keyed on what is
+	-- about to be written, late item data is just a cache miss.
+	local texture, desaturated
+	if locked then
+		texture, desaturated = EMPTY_BAG_TEXTURE, true
+	else
+		texture = itemId and (GetItemIcon(itemId) or UNKNOWN_ITEM_TEXTURE) or EMPTY_BAG_TEXTURE
+		desaturated = false
+	end
+
+	if self.shownLocked == locked and self.shownItemId == itemId
+		and self.shownTexture == texture then
 		return
 	end
-	self.shownLocked, self.shownItemId = locked, itemId
+	self.shownLocked, self.shownItemId, self.shownTexture = locked, itemId, texture
 
 	local icon = self.icon
 	if icon then
-		if locked then
-			icon:SetTexture(EMPTY_BAG_TEXTURE)
-			icon:SetDesaturated(true)
-		else
-			icon:SetTexture(itemId and (GetItemIcon(itemId) or [[Interface\Icons\INV_Misc_QuestionMark]]) or EMPTY_BAG_TEXTURE)
-			icon:SetDesaturated(false)
-		end
+		icon:SetTexture(texture)
+		icon:SetDesaturated(desaturated)
 	end
 
 	self:SetAlpha(locked and 0.55 or 1)
@@ -203,8 +231,17 @@ end
 -- becomes a proper subset of the buttons built, they stop agreeing. (Reverse Slot
 -- Order is safe either way: it flips the iterator's direction, not its
 -- membership.)
+-- The locked test lives HERE rather than in Update, so all three callers agree.
+-- Update used to branch on it itself (`if locked then SetChecked(false) else
+-- UpdateChecked() end`) while OnClick and OnSlotShownChanged called straight in --
+-- and IsEquipped reads GetBagData raw, unlike Update which nils the data when
+-- locked. So for any bagIndex a packet reported a container in while unlockedBags
+-- still excluded it, a BAG_SLOT_SHOW for that index painted the "contents shown"
+-- ring onto a greyed, desaturated locked slot.
 function Bag:UpdateChecked()
-	self:SetChecked(self:IsEquipped() and not self:GetSettings():IsBagSlotHidden(self.bagIndex))
+	self:SetChecked(not self:IsLocked()
+		and self:IsEquipped()
+		and not self:GetSettings():IsBagSlotHidden(self.bagIndex))
 end
 
 -- Deliberately NOT named UpdateTooltip, for the same reason item.lua's cell
@@ -258,5 +295,7 @@ function Bag:IsLocked()
 end
 
 
--- SetFrameID/GetFrameID/GetSettings, plus the tooltip trio above.
+-- SetFrameID/GetFrameID/GetSettings, plus the tooltip trio -- this class hovers,
+-- so it opts into the second half.
 Bagnon.ExtBankWidget:Apply(Bag)
+Bagnon.ExtBankWidget:ApplyTooltip(Bag)

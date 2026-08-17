@@ -38,7 +38,12 @@ function ExtBank:HookNativeGlobals()
 
 	if type(_G.ExtBankOpen) ~= 'function' then
 		-- ebonhold.dll natives aren't present -- not the Ebonhold client,
-		-- or ProjectEbonhold hasn't loaded. Nothing to hook (yet).
+		-- or ProjectEbonhold hasn't loaded. Nothing to hook yet, and "yet" is
+		-- load-bearing: main.lua registers this for PLAYER_ENTERING_WORLD as well as
+		-- PLAYER_LOGIN, so a DLL that arms late gets picked up on the next loading
+		-- screen. Left on PLAYER_LOGIN alone this return was terminal -- the event
+		-- fires once, nothing re-armed, and the addon spent the session inert with
+		-- nothing on screen to say why.
 		return
 	end
 
@@ -86,20 +91,47 @@ function ExtBank:HookNativeGlobals()
 		-- point is to guarantee the flag is cleared, not to hide breakage. That
 		-- is also how the client itself reports an error out of a script
 		-- handler, so this reads no differently to the player or to BugSack.
+		-- Saved and restored, not set-then-cleared. The flag encodes a stack fact
+		-- ("we are somewhere inside a native close"), and a bare false on the way out
+		-- is only correct at depth one: anything reachable from previousClose that
+		-- synchronously calls _G.ExtBank_Close again would clear it while the OUTER
+		-- call is still running, so that call's own OnNativeClose -> FrameSettings:Hide
+		-- -> Frame:OnHide would read it false and call _G.ExtBank_Close a third time,
+		-- re-entering the funnel this flag exists to break. No such nesting is
+		-- reachable in the current ProjectEbonhold build -- its ExtBank_Close body
+		-- traces clean -- so this is a latent case, and two lines is a cheap way to
+		-- stop it depending on somebody else's file staying that way.
+		local wasClosingFromNative = ExtBank.closingFromNative
 		ExtBank.closingFromNative = true
 
+		local previousOk, previousErr
 		if type(previousClose) == 'function' then
-			local ok, err = pcall(previousClose, ...)
-			if not ok then geterrorhandler()(err) end
+			previousOk, previousErr = pcall(previousClose, ...)
+		else
+			previousOk = true
 		end
 
-		local ok, err = pcall(ExtBank.OnNativeClose, ExtBank)
-		if not ok then geterrorhandler()(err) end
+		local ourOk, ourErr = pcall(ExtBank.OnNativeClose, ExtBank)
 
-		ExtBank.closingFromNative = false
+		-- Restored BEFORE anything is reported. geterrorhandler() returns whatever
+		-- error addon is installed (BugSack, Swatter, _ERRORMESSAGE), which is not our
+		-- code and can itself throw -- and a throw here used to escape the wrapper
+		-- with the flag still true, which is the one outcome the pcalls above were
+		-- added to prevent. From that point Frame:OnHide stops telling extBank.lua's
+		-- isOpen upvalue anything on an X or Escape close, silently reinstating the
+		-- "click Void Storage twice to reopen it" bug with no visible cause.
+		ExtBank.closingFromNative = wasClosingFromNative
+
+		if not previousOk then geterrorhandler()(previousErr) end
+		if not ourOk then geterrorhandler()(ourErr) end
 	end
 
 	hooked = true
+
+	-- Nothing left to retry for -- drop both registrations so a zone change stops
+	-- calling back in here for the rest of the session.
+	ExtBank:UnregisterEvent('PLAYER_LOGIN')
+	ExtBank:UnregisterEvent('PLAYER_ENTERING_WORLD')
 end
 
 

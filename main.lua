@@ -115,13 +115,48 @@ function ExtBank:OnEnable()
 	-- an option for this module.
 	self.window = Bagnon.ExtBankFrame:New(self.FRAME_ID)
 
+	-- Published where core looks, as well as kept here. Bagnon keeps its own list
+	-- and answers Bagnon:GetFrame(frameID) out of it; building ours directly left
+	-- that returning nil for 'extbank', which is a licence rather than a nuisance --
+	-- Bagnon:ShowFrame and :ToggleFrame both do `if not GetFrame(id) then
+	-- CreateFrame(id) end`, and core's CreateFrame instantiates the PLAIN Bagnon.Frame.
+	-- That would be a second frame for this frameID: same BagnonFrameextbank global
+	-- name, a second UISpecialFrames entry, and a core ItemFrame querying our 0..69
+	-- ExtBank bag indices as though they were real bagIDs, with nothing pointing at
+	-- it. The only thing standing in the way today is that enabledFrames has no
+	-- 'extbank' key, so IsFrameEnabled returns false -- an unrelated settings default,
+	-- not a guard. Registering makes core's create-on-demand path a no-op by
+	-- construction. Safe: Bagnon/main.lua touches self.frames only in GetFrame and
+	-- CreateFrame, so nothing else iterates it.
+	table.insert(Bagnon.frames, self.window)
+
 	-- Safe to hook immediately, no PLAYER_LOGIN gating -- see the comment
 	-- above it in core/deposit.lua.
 	self:HookInventoryDepositWatch()
 
+	-- Here rather than in OnNativeOpen, for the same reason and by the same test:
+	-- PickupContainerItem and SplitContainerItem are stock Blizzard globals, always
+	-- present, so there is nothing to wait for. Armed lazily at the first open, they
+	-- missed any pickup made BEFORE it -- so a player already carrying a stack when
+	-- they opened the vault for the first time that session had no recorded source,
+	-- and dropping it on a cell was refused with "pick it up from your bags to
+	-- deposit it", which is exactly what they had just done. It self-healed only if
+	-- they put the item down and picked it up again.
+	self:HookCursorTracking()
+
 	-- The ProjectEbonhold-owned globals are the opposite case and have to
 	-- wait for load order to settle -- see core/nativeHooks.lua.
 	self:RegisterEvent('PLAYER_LOGIN', 'HookNativeGlobals')
+
+	-- And again on every world entry, which is the retry. ebonhold.dll can register
+	-- its natives slightly after PLAYER_LOGIN -- the repo's own probe warns about
+	-- exactly that state and ships a manual rehook for it -- and HookNativeGlobals
+	-- bailing out is silent: no packet chain, no window, no error, the addon simply
+	-- absent for the session with /reload the only way back. PLAYER_ENTERING_WORLD
+	-- fires on login and on every zone and instance change, so a late DLL gets
+	-- picked up on the next loading screen instead of never. Both registrations are
+	-- dropped once the hooks are in (see HookNativeGlobals).
+	self:RegisterEvent('PLAYER_ENTERING_WORLD', 'HookNativeGlobals')
 
 	-- PLAYER_LOGIN only ever fires once, at the very start of the session --
 	-- if this module enabled after that already happened, the registration
@@ -148,7 +183,6 @@ end
 -- after that just updates it quietly in place, no visible jump -- so only
 -- this session's first open needs to wait.
 function ExtBank:OnNativeOpen()
-	self:HookCursorTracking()
 	self:HideNativeWindow()
 
 	if self.hasModel then
@@ -168,11 +202,38 @@ function ExtBank:ShowWindow()
 end
 
 local waitingForModel = false
+local pendingShowTimer = nil
 
+-- How long to wait for the session's first snapshot before showing the window
+-- anyway. Comfortably past the ~100ms a snapshot actually takes (measured, see
+-- docs/non-issues.md §10) -- this is a backstop for a snapshot that is never
+-- coming, not a race against a slow one.
+local FIRST_SHOW_TIMEOUT = 3 -- seconds
+
+-- Read by core/deposit.lua: the deposit watch has to arm during this wait too.
+-- The native side considers the vault open from the moment ExtBank_Open runs, so
+-- its own right-click deposit is live throughout -- while our FrameSettings:IsShown()
+-- is still false, which is what the watch used to gate on by itself.
+function ExtBank:IsWaitingForModel()
+	return waitingForModel
+end
+
+-- Deliberately not an open-ended wait. HideNativeWindow (core/nativeHooks.lua)
+-- has already hooked the native frames' Show straight to Hide and latched for the
+-- session by the time we get here, so if the snapshot never lands there is no
+-- vault UI left at all: ours never shows, theirs can no longer show, and nothing
+-- is printed. Reopening cannot recover it -- the hook is already installed --
+-- leaving /reload as the only way back. Any of a dropped ExtBankOpen, a throw
+-- inside ProjectEbonhold's own packet handler, or a server hiccup gets there.
+--
+-- The timeout shows the window regardless. It will be empty and undersized until
+-- some later packet fills it, which is the very thing waiting was meant to avoid
+-- -- but an ugly window the player can close beats no window at all.
 function ExtBank:ShowWindowOnceModelReady()
 	if waitingForModel then return end
 	waitingForModel = true
 	Bagnon.Callbacks:Listen(self, 'EXTBANK_MODEL_UPDATED', 'OnModelReadyForFirstShow')
+	pendingShowTimer = self:ScheduleTimer('OnFirstShowTimeout', FIRST_SHOW_TIMEOUT)
 end
 
 -- Also called from OnNativeClose -- covers closing again before any
@@ -183,9 +244,25 @@ function ExtBank:CancelPendingShow()
 		waitingForModel = false
 		Bagnon.Callbacks:Ignore(self, 'EXTBANK_MODEL_UPDATED')
 	end
+
+	-- Outside the flag's guard: the timer is what clears the flag on the timeout
+	-- path, so by the time OnFirstShowTimeout calls through here the flag is
+	-- already false while the handle still needs dropping.
+	if pendingShowTimer then
+		self:CancelTimer(pendingShowTimer)
+		pendingShowTimer = nil
+	end
 end
 
 function ExtBank:OnModelReadyForFirstShow()
+	self:CancelPendingShow()
+	self:ShowWindow()
+end
+
+function ExtBank:OnFirstShowTimeout()
+	pendingShowTimer = nil
+	if not waitingForModel then return end
+
 	self:CancelPendingShow()
 	self:ShowWindow()
 end
@@ -199,24 +276,55 @@ end
 -- request by the time our hook runs (see OnNativeOpen above) -- so a wrapper
 -- here would only ever be a way to double-send it.
 
+-- Every one of these returns whether the request actually went out, and callers
+-- are expected to check.
+--
+-- They used to return nothing and swallow a missing native silently, which made
+-- this the one path in the addon that failed mute -- and the failure was worse
+-- than mute. components/item.lua ran ClearCursor() and dropped cursorSrc on the
+-- strength of the call having "worked", components/bag.lua did the same for a bag
+-- equip, and core/deposit.lua spent an arm and claimed a destination cell. So the
+-- item snapped back into the bag with no message and no way to tell it from a
+-- server refusal, and the correction that would have retried was already gone.
+-- Everywhere else this addon explains a refusal (core/cursor.lua's three messages,
+-- item.lua's occupied-cell one); the mirrored original does too, printing
+-- "client (ebonhold.dll) not loaded." from its own CanSend and returning false so
+-- its callers stop.
+--
+-- Worth knowing why the global is re-read on every call rather than cached: the
+-- DLL re-registers ExtBankMove as a fresh function object on every packet, so a
+-- cached reference goes stale within ~100ms of the window opening. See
+-- docs/non-issues.md §10 -- that is measured, not defensive.
+local function ReportNoClient()
+	UIErrorsFrame:AddMessage('Void Storage: the ProjectEbonhold client is not responding -- nothing was moved', 1, 0.3, 0.3)
+end
+
 function ExtBank:Unlock()
-	if type(_G.ExtBankUnlock) == 'function' then
-		_G.ExtBankUnlock()
+	if type(_G.ExtBankUnlock) ~= 'function' then
+		ReportNoClient()
+		return false
 	end
+
+	_G.ExtBankUnlock()
+	return true
 end
 
 function ExtBank:Move(srcBag, srcSlot, dstBag, dstSlot, count)
-	if type(_G.ExtBankMove) == 'function' then
-		_G.ExtBankMove(srcBag, srcSlot, dstBag, dstSlot, count or 0)
+	if type(_G.ExtBankMove) ~= 'function' then
+		ReportNoClient()
+		return false
 	end
+
+	_G.ExtBankMove(srcBag, srcSlot, dstBag, dstSlot, count or 0)
+	return true
 end
 
 function ExtBank:WithdrawToInventory(bagIndex, slot)
-	self:Move(self.CONTENT_BASE + bagIndex, slot, self.AUTO_INV, 0)
+	return self:Move(self.CONTENT_BASE + bagIndex, slot, self.AUTO_INV, 0)
 end
 
 function ExtBank:UnequipBag(bagIndex)
-	self:Move(self.HDR_BAG, bagIndex, self.AUTO_INV, 0)
+	return self:Move(self.HDR_BAG, bagIndex, self.AUTO_INV, 0)
 end
 
 -- Targeted variants used by drag & drop onto a specific slot/cell, as
@@ -234,7 +342,7 @@ end
 -- it is the caller that knows what the target cell holds.
 
 function ExtBank:EquipBagToSlot(bag, slot, bagIndex)
-	self:Move(bag, slot, self.HDR_BAG, bagIndex)
+	return self:Move(bag, slot, self.HDR_BAG, bagIndex)
 end
 
 -- `count` is the number of items to move, nil/0 meaning the whole stack. The
@@ -242,9 +350,9 @@ end
 -- and only the split-drag path passes one; every other caller omits it and
 -- keeps sending the sentinel.
 function ExtBank:DepositToSlot(bag, slot, bagIndex, cellSlot, count)
-	self:Move(bag, slot, self.CONTENT_BASE + bagIndex, cellSlot, count)
+	return self:Move(bag, slot, self.CONTENT_BASE + bagIndex, cellSlot, count)
 end
 
 function ExtBank:MoveWithinVault(srcBagIndex, srcSlot, dstBagIndex, dstSlot)
-	self:Move(self.CONTENT_BASE + srcBagIndex, srcSlot, self.CONTENT_BASE + dstBagIndex, dstSlot)
+	return self:Move(self.CONTENT_BASE + srcBagIndex, srcSlot, self.CONTENT_BASE + dstBagIndex, dstSlot)
 end

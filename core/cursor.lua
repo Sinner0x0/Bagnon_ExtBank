@@ -44,8 +44,27 @@ ExtBank.pickSrc = nil  -- { bagIndex, slot } picked from within the vault, or ni
 -- own drag state), so hooking ExtBank_Close does NOT carry the clear over to
 -- us. Called from components/frame.lua's OnHide, the one funnel every close
 -- path already runs through.
+-- The only two writers of pickSrc, so that "a pick was armed or spent" is a single
+-- observable event rather than four scattered assignments. Both announce it on
+-- Bagnon.Callbacks; components/itemFrame.lua listens and repaints, which is what
+-- gives the pick the visual cue the comment above says it lacks.
+--
+-- EXTBANK_PICK_CHANGED deliberately carries no frameID: like the model itself
+-- there is exactly one vault and one outstanding pick at a time.
+function ExtBank:SetPick(bagIndex, slot)
+	self.pickSrc = { bagIndex = bagIndex, slot = slot }
+	Bagnon.Callbacks:SendMessage('EXTBANK_PICK_CHANGED')
+end
+
+-- Early return rather than an unconditional nil-and-broadcast: this is called on
+-- every drop path, both DropCarriedItem branches, OnDragStop and Frame:OnHide, and
+-- most of those calls have nothing to clear. Without the guard each one would send
+-- a message that walks every cell on the page to repaint nothing.
 function ExtBank:ClearPick()
+	if not self.pickSrc then return end
+
 	self.pickSrc = nil
+	Bagnon.Callbacks:SendMessage('EXTBANK_PICK_CHANGED')
 end
 
 local cursorHooked = false
@@ -113,10 +132,32 @@ end
 -- the legitimate case still matches. Two identical items can of course match
 -- each other, but then either one is an equally valid thing to deposit.
 --
+-- The silent half of the check below: "is the item on the cursor right now really
+-- the one those remembered coordinates name?", with no player-facing message and
+-- no accepted-source range test.
+--
+-- Separate from GetVerifiedCursorSource because the two answer for different
+-- callers. That one is answering a DROP the player just made, so each way of
+-- failing earns its own explanation. This one is answering "is the player merely
+-- holding this?" while deciding whether to warn about a stuck item
+-- (core/deposit.lua's CheckDepositStuck) -- nobody asked it a question, so a
+-- refusal there must say nothing at all.
+function ExtBank:GetCarriedInventorySource()
+	local src = self.cursorSrc
+	if not src or not CursorHasItem() then return nil end
+
+	local cursorType, _, cursorLink = GetCursorInfo()
+	if cursorType ~= 'item' or not cursorLink then return nil end
+	if cursorLink ~= GetContainerItemLink(src.bag, src.slot) then return nil end
+
+	return src
+end
+
 -- Returns the verified source, or nil having told the player why not. The
 -- first two messages mirror the ones extBank.lua's own DropIntoCell gives,
 -- so a refused drop explains itself instead of silently bouncing the item
--- back.
+-- back. Staged rather than delegating to GetCarriedInventorySource above,
+-- because which stage fails is exactly what picks the message.
 function ExtBank:GetVerifiedCursorSource()
 	local src = self.cursorSrc
 

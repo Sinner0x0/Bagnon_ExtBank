@@ -85,6 +85,24 @@ local ExtBank = Bagnon.ExtBank
 
 ExtBank.pendingDeposits = nil -- list of GetTime() stamps, one per in-flight real-inventory deposit, or nil
 
+-- Destinations we have already sent a relocation to and not yet seen answered:
+-- claimedSlots[bagIndex][slot] = GetTime() of the send.
+--
+-- Module state rather than a local inside CorrectPendingDeposit, and that is the
+-- whole point. The server answers one move per packet (measured -- see
+-- ConsumePendingDeposit), so a burst of right-clicks arrives as a burst of
+-- SEPARATE packets, each its own CorrectPendingDeposit call. A per-call table
+-- therefore only ever stopped two items in the SAME packet colliding, which is
+-- the rarer half of the problem: across packets the model still showed our own
+-- outstanding destination empty (the server has not answered our relocation yet),
+-- so GetCurrentPageFreeSlot -- which scans page bags in order, slot 0 upward, and
+-- returns the first hit -- handed out the identical cell every time. The second
+-- and later relocations then targeted an occupied cell, which the server refuses
+-- outright with no packet at all (see main.lua's Move wrappers), so every deposit
+-- after the first was silently left on the wrong page with its arm already spent.
+-- Measured as 1 of 6 relocated in a six-item burst.
+ExtBank.claimedSlots = nil
+
 -- How long an armed click stays worth acting on. The correction answers one
 -- specific click, so it's only meaningful while the server's response to THAT
 -- click is still outstanding -- a round trip, not minutes. Past that the click
@@ -98,6 +116,39 @@ local DEPOSIT_RESPONSE_WINDOW = 3 -- seconds
 -- see ConsumePendingDeposit and the note above CorrectPendingDeposit itself.
 function ExtBank:ClearPendingDeposit()
 	self.pendingDeposits = nil
+	self.claimedSlots = nil
+end
+
+-- Remember that a relocation to this cell is in flight, so the next packet's pass
+-- does not pick it again while the model still shows it empty.
+function ExtBank:ClaimSlot(bagIndex, slot)
+	local claimed = self.claimedSlots
+	if not claimed then
+		claimed = {}
+		self.claimedSlots = claimed
+	end
+
+	claimed[bagIndex] = claimed[bagIndex] or {}
+	claimed[bagIndex][slot] = GetTime()
+end
+
+-- Whether a relocation to this cell is still outstanding.
+--
+-- Bounded by the same DEPOSIT_RESPONSE_WINDOW as the arms, and for the same
+-- reason: a relocation the server silently refused is never answered, so an
+-- unbounded claim would block a genuinely free cell for the rest of the session.
+-- Expiring in the reader rather than on a timer keeps this to one clock read on a
+-- path that is already walking these cells.
+function ExtBank:IsSlotClaimed(bagIndex, slot)
+	local claimed = self.claimedSlots and self.claimedSlots[bagIndex]
+	local at = claimed and claimed[slot]
+	if not at then return false end
+
+	if GetTime() - at > DEPOSIT_RESPONSE_WINDOW then
+		claimed[slot] = nil
+		return false
+	end
+	return true
 end
 
 -- Spend exactly one arm: one right-click's worth of "waiting for an answer".
@@ -175,16 +226,16 @@ end
 -- The slice of ExtBank.cells that GetVisibleBags (this frame's current page)
 -- actually covers, first cell with no item in it.
 --
--- `claimed` is anything already promised to an earlier item in this same pass:
--- the server hasn't answered our own relocations yet, so the model still shows
--- those slots empty, and two items landing in one packet would otherwise both
--- be sent to the same one.
+-- Skips anything already promised to an earlier relocation whose answer is still
+-- outstanding (see IsSlotClaimed): the server hasn't answered those yet, so the
+-- model still shows them empty, and without the check every deposit in a burst
+-- would be sent to the same cell.
 --
 -- Returns nil plus a reason rather than a bare nil, because there are three
 -- different ways to have nowhere to put it and the player was previously told
 -- "current page is full" for all three -- including the case where they have
 -- simply toggled every bag off and the page holds no slots at all.
-function ExtBank:GetCurrentPageFreeSlot(claimed)
+function ExtBank:GetCurrentPageFreeSlot()
 	local itemFrame = self.window and self.window:GetItemFrame()
 	if not itemFrame then return nil, nil, 'nowindow' end
 
@@ -193,10 +244,9 @@ function ExtBank:GetCurrentPageFreeSlot(claimed)
 		anyBags = true
 		local size = (self.bags[bagIndex] and self.bags[bagIndex].size) or 0
 		local cells = self.cells[bagIndex]
-		local taken = claimed and claimed[bagIndex]
 
 		for slot = 0, size - 1 do
-			if not (cells and cells[slot]) and not (taken and taken[slot]) then
+			if not (cells and cells[slot]) and not self:IsSlotClaimed(bagIndex, slot) then
 				return bagIndex, slot
 			end
 		end
@@ -264,9 +314,25 @@ function ExtBank:CorrectPendingDeposit(gained, arms)
 	local itemFrame = self.window and self.window:GetItemFrame()
 	if itemFrame then
 		itemFrame:InvalidateVisibleBags()
+
+		-- And clamp the page, for the same reason and in the same breath. The page
+		-- lists are about to be rebuilt from currentPage, which UpdateEverything's
+		-- own clamp has not reached yet -- so if this packet also dropped the bag
+		-- count (unequipping a bag mid-deposit), currentPage can still name a page
+		-- that no longer exists. GetCurrentPageBags then computes a start index past
+		-- the end, yields nothing, and caches an EMPTY page: every landed cell reads
+		-- as off-page, the arm is spent, and GetCurrentPageFreeSlot reports 'nobags'
+		-- -- telling the player "no bag shown on this page" while bags are plainly
+		-- on screen, and relocating nothing.
+		--
+		-- ClampCurrentPage, not SetCurrentPage: the latter runs a full synchronous
+		-- UpdateEverything and sends ITEM_FRAME_PAGE_UPDATE, which is both wasted
+		-- (the broadcast at the end of this packet does it anyway) and re-entrant
+		-- from inside ParsePacket.
+		itemFrame:ClampCurrentPage()
 	end
 
-	local claimed, complained
+	local complained
 	for i = 1, #gained do
 		if arms == 0 then return end
 
@@ -279,7 +345,7 @@ function ExtBank:CorrectPendingDeposit(gained, arms)
 			arms = arms - 1
 			self:ConsumePendingDeposit()
 
-			local dstBag, dstSlot, why = self:GetCurrentPageFreeSlot(claimed)
+			local dstBag, dstSlot, why = self:GetCurrentPageFreeSlot()
 			if not dstBag then
 				-- Once per packet, not once per item -- a bulk deposit into a
 				-- full page would otherwise print the same line a dozen times.
@@ -294,11 +360,12 @@ function ExtBank:CorrectPendingDeposit(gained, arms)
 				return
 			end
 
-			claimed = claimed or {}
-			claimed[dstBag] = claimed[dstBag] or {}
-			claimed[dstBag][dstSlot] = true
-
-			self:MoveWithinVault(landed.bagIndex, landed.slot, dstBag, dstSlot)
+			-- Claimed only if the request actually went out. Move returns false when
+			-- ebonhold.dll's native is not callable, and claiming a cell we never
+			-- asked for would block it for the whole response window.
+			if self:MoveWithinVault(landed.bagIndex, landed.slot, dstBag, dstSlot) then
+				self:ClaimSlot(dstBag, dstSlot)
+			end
 		end
 	end
 end
@@ -415,8 +482,18 @@ function ExtBank:CheckDepositStuck(bag, slot, link, rechecked)
 	-- then. Once, not in a loop -- a player who parks an item on the cursor
 	-- and walks away shouldn't leave a timer rearming itself forever, and
 	-- unlike the deposit lock, "still carrying it" is a state they can see.
-	local src = self.cursorSrc
-	if CursorHasItem() and src and src.bag == bag and src.slot == slot then
+	-- Verified, not read raw. cursorSrc is only written by the PickupContainerItem
+	-- hook, so it holds "where the last item picked up out of a container came
+	-- from", which core/cursor.lua spends fifty lines explaining is not the same as
+	-- "where the thing on the cursor now came from" -- ClearCursor leaves the
+	-- coordinates behind, and PickupInventoryItem loads the cursor without touching
+	-- them. Comparing them raw meant an unrelated carried item (a weapon dragged off
+	-- the character pane) whose stale coordinates happened to name this slot read as
+	-- "the player is just holding this one", suppressing the warning on the recheck
+	-- and leaving a genuinely stuck item unexplained for good. The link check is the
+	-- same one GetVerifiedCursorSource already does for drops.
+	local src = self:GetCarriedInventorySource()
+	if src and src.bag == bag and src.slot == slot then
 		if not rechecked then
 			self:ScheduleTimer('CheckDepositStuck', STUCK_RECHECK_DELAY, bag, slot, link, true)
 		end
@@ -466,7 +543,18 @@ function ExtBank:HookInventoryDepositWatch()
 
 	hooksecurefunc('UseContainerItem', function(bag, slot)
 		if not (bag and bag >= 0 and bag <= 4) then return end -- not real live-inventory (bank, keyring, ...)
-		if not Bagnon.FrameSettings:Get(ExtBank.FRAME_ID):IsShown() then return end
+
+		-- "Is the vault open?", and our own window being on screen is only half of
+		-- that. On the session's first open main.lua waits for the snapshot before
+		-- showing anything (~100ms, longer if it is late, forever if it never comes),
+		-- but the NATIVE side set its own isOpen the moment ExtBank_Open ran -- so its
+		-- right-click deposit post-hook is already live in that gap, and a deposit
+		-- made there is a real deposit that can be really refused. Gated on IsShown()
+		-- alone, neither the page correction nor -- the part that matters -- the
+		-- stuck-item warning armed for it, leaving the player with an item that cannot
+		-- be used, moved or sold and nothing on screen explaining why.
+		if not (ExtBank:IsWaitingForModel()
+			or Bagnon.FrameSettings:Get(ExtBank.FRAME_ID):IsShown()) then return end
 		ExtBank:ArmPendingDeposit()
 
 		-- Read the link HERE, not in the check itself: by then the slot may be

@@ -120,6 +120,10 @@ end
 -- end, so there's no separate bounds-checking needed here.
 
 function PageBar:ChangePage(delta)
+	-- Same reason ItemFrame:OnMouseWheel does it: the grid re-flows, so an
+	-- outstanding in-vault pick would land on whatever cell takes that spot.
+	Bagnon.ExtBank:ClearPick()
+
 	local itemFrame = self:GetItemFrame()
 	if itemFrame then
 		itemFrame:SetCurrentPage(itemFrame:GetCurrentPage() + delta)
@@ -225,5 +229,10 @@ end
 
 -- SetFrameID/GetFrameID come from Bagnon.ExtBankWidget
 -- (components/widget.lua). GetSettings comes with them and is unused here --
--- harmless, and cheaper than carving the mixin up per class.
+-- harmless, so it is not worth splitting the identity methods up per class.
+--
+-- The tooltip trio is a separate ApplyTooltip and is deliberately NOT taken: this
+-- bar has no RefreshTooltip, so RefreshTooltipIfOwned would be a method that could
+-- only ever error. That is the line between the two halves -- an unused accessor is
+-- harmless, an uncallable method is a trap.
 Bagnon.ExtBankWidget:Apply(PageBar)

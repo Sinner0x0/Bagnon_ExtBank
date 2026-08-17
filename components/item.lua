@@ -69,6 +69,17 @@ function ItemSlot:Create()
 	item:SetScript('OnUpdate', nil)
 	item.UpdateTooltip = nil
 
+	-- The cue for an outstanding vault pick. Same texture and blend the bag-slot
+	-- strip already uses for its own "contents shown" ring (components/bag.lua's
+	-- constructor), so the two read as the same visual language. Created once and
+	-- toggled by UpdatePicked; starts hidden.
+	local picked = item:CreateTexture(nil, 'OVERLAY')
+	picked:SetTexture([[Interface\Buttons\CheckButtonHilight]])
+	picked:SetBlendMode('ADD')
+	picked:SetAllPoints(item)
+	picked:Hide()
+	item.pickedHighlight = picked
+
 	return item
 end
 
@@ -104,6 +115,16 @@ function ItemSlot:Free()
 	self:ClearAllPoints()
 	self:SetParent(nil)
 
+	-- Unlike the texture and count, the pick highlight is dropped on the way into
+	-- the pool. Those two are re-resolved by Update against the new binding, so
+	-- carrying them over is harmless (and is what lets the cache survive pooling);
+	-- the highlight is not, because a button restored onto some other cell while
+	-- still showing it would mark the wrong cell as picked until the next arm or
+	-- clear happened to come along.
+	if self.pickedHighlight then
+		self.pickedHighlight:Hide()
+	end
+
 	ItemSlot.unused = ItemSlot.unused or {}
 	ItemSlot.unused[self] = true
 end
@@ -113,26 +134,63 @@ end
 
 function ItemSlot:OnShow()
 	self:Update()
+	self:UpdatePicked()
 end
 
--- Left-click with an empty cursor and hand holding nothing: picks the item
--- up (virtually -- see ExtBank.pickSrc in core/cursor.lua). Right-click or
--- shift-click: withdraws it straight to inventory, no pickup step needed.
--- Either way, dropping something already carried takes priority.
+-- Kept off Update()'s path on purpose. Update caches on the resolved item state,
+-- and pick state is not item state -- folding it into that key would widen it for
+-- something unrelated and make every arm and clear look like a content change.
+-- Reading ExtBank.pickSrc directly instead means this is always self-consistent
+-- whenever it runs, whether that is from OnShow (so a freshly built or pooled
+-- button adopts the current state) or from itemFrame.lua's EXTBANK_PICK_CHANGED
+-- handler.
+function ItemSlot:UpdatePicked()
+	local highlight = self.pickedHighlight
+	if not highlight then return end
+
+	local src = ExtBank.pickSrc
+	if src and src.bagIndex == self.bagIndex and src.slot == self.slot then
+		highlight:Show()
+	else
+		highlight:Hide()
+	end
+end
+
+-- Left-click with nothing carried: picks the item up (virtually -- see
+-- ExtBank.pickSrc in core/cursor.lua). Right-click or shift-click: withdraws it
+-- straight to inventory, no pickup step needed.
+--
+-- The withdraw test comes FIRST, ahead of DropCarriedItem, and that ordering is a
+-- fix rather than a tidy-up. A pick puts nothing on the real cursor, so a player
+-- who left-clicked a cell a minute ago has no way to know one is still armed --
+-- and DropCarriedItem running first meant their next right-click, plainly meant as
+-- "withdraw this", was instead spent completing the forgotten move: the pick was
+-- consumed, the occupied-cell check refused it, and they were answered with
+-- "Void Storage: that slot is taken -- drop it on an empty one", describing a drop
+-- they never made, while the withdrawal simply did not happen. A right-click is
+-- unambiguous, so it now supersedes any outstanding pick instead of being eaten by
+-- it. Confirmed as the same hazard OnDragStop's own comment describes for the drag
+-- route, which was fixed there and not here.
+--
+-- Only LeftButton arms a pick. The button is RegisterForClicks('anyUp'), so the
+-- old catch-all `else` armed one on middle-click and on mouse buttons 4 and 5 too
+-- -- invisible state from a gesture nobody would associate with picking an item up.
 function ItemSlot:OnClick(button)
+	if button == 'RightButton' or IsShiftKeyDown() then
+		ExtBank:ClearPick()
+
+		if self:GetCellData() then
+			ExtBank:WithdrawToInventory(self.bagIndex, self.slot)
+		end
+		return
+	end
+
 	if self:DropCarriedItem() then
 		return
 	end
 
-	local data = self:GetCellData()
-	if not data then
-		return
-	end
-
-	if button == 'RightButton' or IsShiftKeyDown() then
-		ExtBank:WithdrawToInventory(self.bagIndex, self.slot)
-	else
-		ExtBank.pickSrc = { bagIndex = self.bagIndex, slot = self.slot }
+	if button == 'LeftButton' and self:GetCellData() then
+		ExtBank:SetPick(self.bagIndex, self.slot)
 	end
 end
 
@@ -147,7 +205,7 @@ end
 function ItemSlot:OnDragStart()
 	if not self:GetCellData() then return end
 
-	ExtBank.pickSrc = { bagIndex = self.bagIndex, slot = self.slot }
+	ExtBank:SetPick(self.bagIndex, self.slot)
 
 	local itemFrame = self:GetParent()
 	if itemFrame and itemFrame.SetDraggingSlot then
@@ -307,9 +365,14 @@ function ItemSlot:DropCarriedItem()
 			-- src.count is nil for a whole-stack pickup and the carried amount for
 			-- a shift-drag split, so this sends the 0 ("everything") sentinel
 			-- exactly where it always did.
-			ExtBank:DepositToSlot(src.bag, src.slot, self.bagIndex, self.slot, src.count)
-			ClearCursor()
-			ExtBank.cursorSrc = nil
+			-- Only let go of the cursor if the request actually went out. If the
+			-- client is not answering, DepositToSlot says so and returns false, and
+			-- ClearCursor()ing anyway would drop the item back into the bag as
+			-- though the deposit had been accepted.
+			if ExtBank:DepositToSlot(src.bag, src.slot, self.bagIndex, self.slot, src.count) then
+				ClearCursor()
+				ExtBank.cursorSrc = nil
+			end
 		end
 		return true
 	elseif ExtBank.pickSrc then
@@ -569,5 +632,7 @@ function ItemSlot:GetCellData()
 end
 
 
--- SetFrameID/GetFrameID/GetSettings, plus the tooltip trio above.
+-- SetFrameID/GetFrameID/GetSettings, plus the tooltip trio -- this class hovers,
+-- so it opts into the second half.
 Bagnon.ExtBankWidget:Apply(ItemSlot)
+Bagnon.ExtBankWidget:ApplyTooltip(ItemSlot)

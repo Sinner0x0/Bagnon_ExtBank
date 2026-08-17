@@ -152,7 +152,17 @@ function ExtBank:ParsePacket(hex)
 		if itemId == 0 then
 			self.cells[bi][slot] = nil
 		else
-			if watchingDeposits then
+			-- `bi >= 0` bounds the DEPOSIT side only, not the parse. A cell record
+			-- naming a bag below CONTENT_BASE yields a negative bagIndex, which the
+			-- mirrored original tolerates harmlessly -- it only ever reads
+			-- cells[activeBag] with activeBag >= 0, so a stray cells[-1] just sits
+			-- there. Ours is not inert: core/deposit.lua would find bag -1 off-page
+			-- (it can never be on one), spend an arm, and send a MoveWithinVault whose
+			-- source resolves back to CONTENT_BASE + -1 = 19, the bag-slot strip. So
+			-- the guard goes on the `gained` push, where the exposure actually is,
+			-- rather than on the assignment below -- which stays byte-for-byte with
+			-- extBank.lua per the mirroring policy (docs/non-issues.md §2).
+			if watchingDeposits and bi >= 0 then
 				-- Newly occupied, occupied by a DIFFERENT item than before, or
 				-- an existing stack that grew. A right-click deposit can land
 				-- as any of the three, and that last one -- merging into a

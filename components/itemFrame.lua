@@ -189,6 +189,20 @@ function ItemFrame:SHOW_EMPTY_ITEM_SLOT_TEXTURE_UPDATE()
 	end
 end
 
+-- An in-vault pick was armed or spent (core/cursor.lua's SetPick/ClearPick).
+-- Repaints the cue rather than the contents: UpdatePicked is deliberately not part
+-- of Update, so this cannot disturb the item cache.
+--
+-- Every cell, not just the two that changed. Finding which button previously held
+-- the highlight would mean tracking it, and the loop is a table index and at most
+-- one texture toggle per cell against a message sent only on a real arm or clear --
+-- far cheaper than the state it would take to avoid.
+function ItemFrame:EXTBANK_PICK_CHANGED()
+	for _, itemSlot in pairs(self.itemSlots) do
+		itemSlot:UpdatePicked()
+	end
+end
+
 
 --[[ Frame Events ]]--
 
@@ -231,7 +245,13 @@ end
 -- convention as the page bar's own prev/next buttons (see pageBar.lua),
 -- wheel-up meaning "earlier page" the way scrolling up means "earlier
 -- content" everywhere else in the client.
+-- Paging cancels any outstanding pick, here and in PageBar:ChangePage. The grid
+-- re-flows under the player, so a pick armed against the old page would complete
+-- itself onto whatever cell now occupies that spot -- and being invisible, it would
+-- do so with no hint that a stale gesture was involved.
 function ItemFrame:OnMouseWheel(delta)
+	ExtBank:ClearPick()
+
 	if delta > 0 then
 		self:SetCurrentPage(self:GetCurrentPage() - 1)
 	else
@@ -256,6 +276,7 @@ function ItemFrame:UpdateEvents()
 		self:RegisterMessage('ITEM_FRAME_BAGS_PER_PAGE_UPDATE')
 		self:RegisterMessage('TEXT_SEARCH_UPDATE')
 		self:RegisterMessage('SHOW_EMPTY_ITEM_SLOT_TEXTURE_UPDATE')
+		self:RegisterMessage('EXTBANK_PICK_CHANGED')
 	end
 end
 
@@ -278,10 +299,7 @@ function ItemFrame:UpdateEverything()
 	-- player (unequipping one, or a model update that drops the total
 	-- below what the old page needed) -- clamp before reloading so
 	-- ReloadAllItemSlots/Layout below see a page that actually exists.
-	local pageCount = self:GetPageCount()
-	if self:GetCurrentPage() > pageCount then
-		self.currentPage = pageCount
-	end
+	self:ClampCurrentPage()
 
 	self:ReloadAllItemSlots()
 	self:RequestLayout()
@@ -607,6 +625,18 @@ end
 
 function ItemFrame:GetCurrentPage()
 	return self.currentPage or 1
+end
+
+-- Pulls currentPage back into range without any of SetCurrentPage's side effects
+-- -- no reload, no ITEM_FRAME_PAGE_UPDATE. UpdateEverything calls it before
+-- rebuilding, and core/deposit.lua's correction calls it after dropping the cached
+-- page lists, because that runs from inside ParsePacket where a synchronous
+-- UpdateEverything would be both redundant and re-entrant.
+function ItemFrame:ClampCurrentPage()
+	local pageCount = self:GetPageCount()
+	if self:GetCurrentPage() > pageCount then
+		self.currentPage = pageCount
+	end
 end
 
 -- Clamped to the valid range -- callers (the page bar's prev/next buttons,

@@ -38,7 +38,27 @@ Bagnon.ExtBankWidget = Widget
 -- from here.
 function Widget:Apply(class)
 	for name, method in pairs(Widget) do
-		if name ~= 'Apply' and rawget(class, name) == nil then
+		if name ~= 'Apply' and name ~= 'tooltip' and name ~= 'ApplyTooltip'
+			and rawget(class, name) == nil then
+			class[name] = method
+		end
+	end
+end
+
+-- The tooltip trio is opt-in, unlike the identity methods above, because it is not
+-- inert on a class that does not want it. RefreshTooltipIfOwned calls
+-- self:RefreshTooltip(), which only the two hovering widget classes define -- so
+-- applying it to ItemFrame, BagFrame and PageBar planted a method that could only
+-- ever raise "attempt to call method 'RefreshTooltip' (a nil value)". Nothing calls
+-- it on them today, so it was latent rather than broken, but a handler wired by name
+-- (the way Bag:OnShow wires 'Update') is one line away from reaching it.
+--
+-- Note this is a different case from the unused GetSettings that pageBar.lua's own
+-- comment weighs up: an extra accessor nobody calls costs a table slot, while a
+-- method that cannot run is a trap. Only the second is worth splitting for.
+function Widget:ApplyTooltip(class)
+	for name, method in pairs(Widget.tooltip) do
+		if rawget(class, name) == nil then
 			class[name] = method
 		end
 	end
@@ -61,6 +81,10 @@ end
 
 
 --[[ Tooltip ]]--
+-- Applied only via ApplyTooltip, i.e. only to the two classes that actually hover
+-- (components/item.lua's cells and components/bag.lua's strip slots).
+
+Widget.tooltip = {}
 
 -- Flip the tooltip to the inside edge once this widget is past the middle of
 -- the screen, so it never runs off the side.
@@ -83,7 +107,7 @@ end
 -- UIParent's space -- so a cell physically 30% across the screen reported ~60%,
 -- the test flipped, and the tooltip anchored off the left edge. Convert into
 -- UIParent's space before comparing.
-function Widget:AnchorTooltip()
+function Widget.tooltip:AnchorTooltip()
 	local right = self:GetRight()
 
 	if right then
@@ -103,8 +127,23 @@ end
 -- UpdateTooltip name also loses the incidental refresh Blizzard's own
 -- GameTooltip_OnUpdate poll was giving us, so anything that changes what a
 -- hovered widget should be saying has to ask for the redraw explicitly.
-function Widget:RefreshTooltipIfOwned()
-	if GameTooltip:IsOwned(self) then
+--
+-- IsShown() as well as IsOwned(), because ownership is not hover. SetOwner in
+-- AnchorTooltip claims the tooltip and nothing ever gives it back: OnLeave below
+-- calls GameTooltip:Hide(), which hides it but leaves the owner pointing here, so
+-- IsOwned stays true long after the mouse has gone. On IsOwned alone the next
+-- Update -- one arrives on every packet -- re-ran the whole SetHyperlink/Show
+-- sequence and popped a tooltip open beside a cell the cursor was nowhere near,
+-- again on every packet after that. Through the pool it was worse: the owning
+-- button can be Free()d and Restore()d onto different coordinates while still the
+-- owner, so the re-show described a DIFFERENT item, anchored to a button whose
+-- SetPoint had not landed yet.
+--
+-- A hidden tooltip never needs refreshing, and nothing legitimate wants one: the
+-- only caller that shows a tooltip from scratch is OnEnter, which calls
+-- RefreshTooltip directly and does not come through here.
+function Widget.tooltip:RefreshTooltipIfOwned()
+	if GameTooltip:IsOwned(self) and GameTooltip:IsShown() then
 		self:RefreshTooltip()
 	end
 end
@@ -113,7 +152,7 @@ end
 -- whole UI, and by the time our OnLeave runs another frame's OnEnter may
 -- already have taken ownership of it -- hiding unconditionally then blanks a
 -- tooltip that belongs to something else. Only hide what is still ours.
-function Widget:OnLeave()
+function Widget.tooltip:OnLeave()
 	if GameTooltip:IsOwned(self) then
 		GameTooltip:Hide()
 	end
