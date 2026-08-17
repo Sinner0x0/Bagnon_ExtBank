@@ -431,51 +431,9 @@ function ItemFrame:ApplySize(width, height)
 	self:SendMessage('ITEM_FRAME_SIZE_CHANGE', self:GetFrameID())
 end
 
--- Dispatches to whichever of the two layouts below the "Bag Break Layout"
--- setting asks for -- same switch core Bagnon's own itemFrame.lua makes.
-function ItemFrame:Layout()
-	if self:IsBagBreakEnabled() then
-		self:Layout_BagBreak()
-	else
-		self:Layout_Default()
-	end
-end
-
--- One continuous flowing grid across every visible bag -- the same "single
--- huge bag" feel as core Bagnon's own merged bank/bag view (Layout_Default),
--- not a row-per-bag break. A bag boundary never starts a new row by itself;
--- slots just keep filling left-to-right, wrapping at the column count,
--- regardless of which bag they belong to.
-function ItemFrame:Layout_Default()
-	local columns = self:NumColumns()
-	local spacing = self:GetSpacing()
-	local effItemSize = self.ITEM_SIZE + spacing
-
-	local i = 0
-	for _, bagIndex in self:GetVisibleBags() do
-		for slot = 0, self:GetBagSize(bagIndex) - 1 do
-			local itemSlot = self:GetItemSlot(bagIndex, slot)
-			if itemSlot then
-				local row = math.floor(i / columns)
-				local col = i % columns
-				itemSlot:ClearAllPoints()
-				itemSlot:SetPoint('TOPLEFT', self, 'TOPLEFT', effItemSize * col, -effItemSize * row)
-				i = i + 1
-			end
-		end
-	end
-
-	-- Always the full column count wide, even with a part-filled last row or
-	-- nothing to show at all -- see "Fixed grid width" below.
-	local width = effItemSize * math.max(columns, 1) - spacing
-	local height = effItemSize * math.max(math.ceil(i / columns), 1) - spacing
-	self:ApplySize(width, height)
-end
-
 --[[ Fixed grid width ]]--
--- Both layouts here -- Layout_Default above and Layout_BagBreak below --
--- size to the full column count rather than to how many cells actually got
--- placed.
+-- Layout below sizes to the full column count rather than to how many cells
+-- actually got placed.
 --
 -- Height still tracks content -- an empty vault shouldn't reserve a
 -- screenful of blank rows -- but the width has to be stable, because the
@@ -490,12 +448,32 @@ end
 -- the size the "Columns" slider asks for, whatever is in the vault at the
 -- time.
 
--- Same idea, but each bag always starts its own fresh row -- a bag with
--- slots left over at the end of a row pads out to the next one instead of
--- letting the following bag's items share it. Column/row counting here is
--- 0-based throughout (to match GetSlotIndex/AddItemSlot's own 0-based bag
--- and slot numbering), unlike core Bagnon's 1-based Layout_BagBreak.
-function ItemFrame:Layout_BagBreak()
+-- Places every cell on the current page, in one of the two modes the "Bag
+-- Break" setting selects -- the same switch core Bagnon's own itemFrame.lua
+-- makes, though core keeps a separate function per mode:
+--
+--   off  one continuous flowing grid across every visible bag, the same
+--        "single huge bag" feel as core's merged bank/bag view. A bag
+--        boundary never starts a new row by itself; slots just keep filling
+--        left-to-right, wrapping at the column count, regardless of which
+--        bag they belong to.
+--   on   each bag always starts its own fresh row -- a bag with slots left
+--        over at the end of a row pads out to the next one instead of
+--        letting the following bag's items share it.
+--
+-- Kept as one function because the two modes differ in exactly one statement
+-- (the per-bag break at the bottom of the outer loop). As two nearly-
+-- identical functions they had already drifted apart in how each counted
+-- rows for the final height -- one from a running cell count via
+-- math.ceil(i / columns), the other from the row cursor directly -- which is
+-- the kind of divergence that turns into a real off-by-one the next time
+-- only one of them gets edited.
+--
+-- Column/row counting is 0-based throughout, matching GetSlotIndex and
+-- AddItemSlot's own 0-based bag and slot numbering, unlike core's 1-based
+-- bag-break layout.
+function ItemFrame:Layout()
+	local bagBreak = self:IsBagBreakEnabled()
 	local columns = self:NumColumns()
 	local spacing = self:GetSpacing()
 	local effItemSize = self.ITEM_SIZE + spacing
@@ -517,16 +495,27 @@ function ItemFrame:Layout_BagBreak()
 			end
 		end
 
-		-- force the next bag onto a fresh row, unless this one happened to
-		-- end exactly on a column boundary already
-		if col > 0 then
+		-- Force the next bag onto a fresh row, unless this one happened to
+		-- end exactly on a column boundary already. Skipped entirely in
+		-- flowing mode, which is the one and only difference between the
+		-- two modes this function covers.
+		if bagBreak and col > 0 then
 			col = 0
 			row = row + 1
 		end
 	end
 
+	-- `row` counts COMPLETED rows only, so a part-filled last one still needs
+	-- to be added on. In bag-break mode the loop above has always already
+	-- closed it (col is back to 0 once the last bag is done), so `row` alone
+	-- used to be enough for that mode; in flowing mode this reproduces the
+	-- same number its separate math.ceil(cells / columns) used to.
+	local rows = row + (col > 0 and 1 or 0)
+
+	-- Always the full column count wide, even with a part-filled last row or
+	-- nothing to show at all -- see "Fixed grid width" above.
 	local width = effItemSize * math.max(columns, 1) - spacing
-	local height = effItemSize * math.max(row, 1) - spacing
+	local height = effItemSize * math.max(rows, 1) - spacing
 	self:ApplySize(width, height)
 end
 
@@ -572,8 +561,8 @@ function ItemFrame:GetAllVisibleBags()
 	return list
 end
 
--- What Layout_Default/Layout_BagBreak/ReloadAllItemSlots actually draw --
--- just the slice of GetAllVisibleBags that falls on the current page.
+-- What Layout/ReloadAllItemSlots actually draw -- just the slice of
+-- GetAllVisibleBags that falls on the current page.
 function ItemFrame:GetVisibleBags()
 	return ipairs(self:GetCurrentPageBags())
 end
@@ -582,9 +571,9 @@ end
 --[[ Pagination ]]--
 -- ExtBank's bag count can run up to 70 bags of up to 36 slots each (2520
 -- possible cells) -- showing every equipped bag in one continuously-
--- growing grid, the way Layout_Default/Layout_BagBreak above do for every
--- other Bagnon frame, would make an unusably huge window well before a
--- player got anywhere near that. Paginate by BAG, never splitting one
+-- growing grid, the way Layout above does for every other Bagnon frame,
+-- would make an unusably huge window well before a player got anywhere
+-- near that. Paginate by BAG, never splitting one
 -- bag's cells across two pages -- each page shows up to GetBagsPerPage()
 -- whole bags, with pageBar.lua's page bar (created by frame.lua, below the
 -- grid) to navigate between pages, plus this frame's own OnMouseWheel
