@@ -346,3 +346,76 @@ call of core's own.
 
 *Entries 5-8 verified against the vendored sources on 2026-08-17; entry 5's in-game
 behaviour reported from an earlier build that implemented and then reverted the border.*
+
+---
+
+## 9. Escape calls `ExtBank_Close()` three times; the X button calls it once
+
+**Where:** [`components/frame.lua`](../components/frame.lua) — `Frame:OnHide`, and
+[`core/nativeHooks.lua`](../core/nativeHooks.lua) — the `_G.ExtBank_Close` wrapper.
+
+**What gets flagged.** Closing our window with Escape produces three
+`ExtBank_Close()` calls inside a single frame; the X button and walking away from
+the banker each produce one. That looks like the close funnel re-entering itself,
+which is the same failure family as the constructor re-entrancy that freezes the
+client — so it reads as serious.
+
+**Why it stays.** Measured with a `debugstack` on every call, across three
+sessions. Only the first call is ours, and it is correct:
+
+| # | Immediate caller | Whose code |
+|---|---|---|
+| 1 | `components/frame.lua:184` (our `OnHide`) ← `[C]: Hide` ← `FrameXML/UIParent.lua:2116` (`CloseSpecialWindows`) | ours, and required |
+| 2 | `extBank.lua:697` (its `BANKFRAME_CLOSED` handler) ← `[C]: CloseBankFrame` ← `Bagnon/components/frame.lua:207` | ProjectEbonhold's |
+| 3 | identical stack to #2 — `BANKFRAME_CLOSED` is dispatched twice | ProjectEbonhold's |
+
+The mechanism is entirely outside this addon. Escape runs
+`CloseSpecialWindows`, which hides *every* shown `UISpecialFrames` entry — and
+core Bagnon registers one per frame at creation
+(`Bagnon/components/frame.lua:38`). So Escape hides our vault window (→ call #1,
+the branch that exists to keep `extBank.lua`'s `isOpen` upvalue honest) *and*
+Bagnon's bank window, whose `OnHide` calls `CloseBankFrame()`
+(`Bagnon/components/frame.lua:203-216`). That fires `BANKFRAME_CLOSED`
+synchronously, and `extBank.lua` closes the vault from its own handler. Calls #2
+and #3 are one addon calling its own global in response to an event another addon
+raised; deduplicating them would mean suppressing ProjectEbonhold's calls to its
+own code, which is not ours to do.
+
+Note this route exists **only because of us**: `extBank.lua` registers nothing in
+`UISpecialFrames` (only `voidStorage.lua:47` does, for a different frame), so
+Escape does not touch the vault in the native UI at all. That is why it was worth
+tracing rather than dismissing.
+
+**Why the extra calls are harmless.** `extBank.lua`'s `ExtBank_Close` body is
+idempotent — `isOpen = false`, a `Hide()` on an already-hidden frame,
+`StaticPopup_Hide` on nothing, and a `RestoreBankPanel` that disarms itself via
+`hidBankPanel`. On our side `OnNativeClose` reaches
+`FrameSettings:Hide()`, whose counter clamps at zero rather than going negative,
+and the re-entrant `OnHide` never fires because the frame is already hidden. The
+only call with an effect outside the client is `ExtBankSetActive(0)`, repeated.
+
+Measured behaviour after all three routes: window closed, session ended,
+reopening took one click, no Lua error.
+
+**Left unexplained on purpose.** `BANKFRAME_CLOSED` is dispatched **twice** on the
+Escape route (once on walk-away), each time synchronously inside a
+`CloseBankFrame()` from core Bagnon's `Frame:OnHide`. What drove the second hide
+sat below the traceback's cut-off. It is not chased further because the answer
+lies entirely between core Bagnon and the client, changes nothing here either way,
+and calls #2 and #3 are already accounted for whatever it turns out to be.
+
+**Reopen if:** `components/frame.lua` appears **more than once** in a single
+Escape's stacks — that would be genuine re-entrancy in our funnel and a real bug —
+or if the call count changes shape (an *open* burst, rather than a close burst,
+would be the dangerous one: `FrameSettings:Show()` increments the same counter
+that `Hide()` decrements, and only the clamp at zero is currently absorbing the
+imbalance).
+
+**Related, deliberately not done.** `OnNativeClose` calls `FrameSettings:Hide()`,
+which decrements, where `Hide(true)` would force. Forcing is arguably the honest
+expression of intent — this window has exactly one owner, unlike core's inventory
+that the bank auto-opens — but there is no symptom behind it, so it is recorded
+here rather than changed.
+
+*Dispositioned 2026-08-17 from probe logs; stacks reproduced on the X-button and
+walk-away routes as controls.*
