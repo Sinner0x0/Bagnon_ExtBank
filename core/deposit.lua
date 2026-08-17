@@ -23,10 +23,44 @@ local ExtBank = Bagnon.ExtBank
 
 --[[ Right-click deposit, scoped to the currently-displayed page ]]--
 -- extBank.lua's own right-click deposit is itself a hooksecurefunc
--- post-hook on ContainerFrameItemButton_OnClick -- fires after the real
--- click already ran, no OnClick replacement, no taint -- that fires off
--- ExtBankMove(bag, slot, 0xFF, 0) -- 0xFF meaning "first free slot" -- and
--- never checks where it landed. An EARLIER version of this addon tried to
+-- post-hook on ContainerFrameItemButton_OnClick (and on
+-- ContainerFrameItemButton_OnModifiedClick, for the shift+right-click
+-- "equip this container" case) -- fires after the real click already ran,
+-- no OnClick replacement, no taint -- and never checks where it landed.
+--
+-- WHERE it lands is the part that matters here, and it is not what an
+-- earlier version of this comment claimed. Read against extBank.lua
+-- itself -- ProjectEbonhold ships its addon Lua inside the client's MPQ
+-- patch rather than on disk, so it has to be extracted to be read --
+-- its handler is:
+--
+--     local freeSlot = FirstFreeActiveSlot()          -- in bags[activeBag]
+--     if freeSlot ~= nil then
+--         ExtBankMove(bag, slot, CONTENT_BASE + activeBag, freeSlot, 0)
+--     else
+--         ExtBankMove(bag, slot, 0xFF, 0, 0)          -- first free anywhere
+--     end
+--
+-- So 0xFF is only the FALLBACK, reached when the active bag is full or
+-- has no container equipped. The normal case targets one specific bag.
+--
+-- And `activeBag` is pinned to 0 for as long as this addon is installed.
+-- It has exactly two writers in the whole of extBank.lua: a clamp in
+-- ExtBank_OnPacket (`if activeBag >= unlockedBags then activeBag =
+-- max(0, unlockedBags - 1)`, which from 0 can never raise it), and the
+-- bag-strip buttons' OnClick. Those buttons are children of
+-- ExtBankFrame, which HideNativeWindow (core/nativeHooks.lua) hides
+-- permanently -- so they are never clicked and never write it.
+--
+-- The consequence for everything below: while ext bag 0 has a free slot,
+-- EVERY right-click deposit lands in ext bag 0. The correction in this
+-- file is therefore the normal path whenever the player is looking at a
+-- page that doesn't include bag 0 -- not the occasional fixup the rest of
+-- this comment used to describe. Each such deposit costs two server round
+-- trips, which is inherent: a sibling hooksecurefunc cannot cancel or
+-- redirect the native's move, only follow it.
+--
+-- An EARLIER version of this addon tried to
 -- do better by overriding OnClick outright on core's own Bagnon.ItemSlot
 -- class -- which, for the player's own real bag/bank windows, is under
 -- default settings literally the same live Blizzard globals
@@ -58,8 +92,28 @@ ExtBank.pendingDeposits = nil -- list of GetTime() stamps, one per in-flight rea
 -- item the player never deposited.
 local DEPOSIT_RESPONSE_WINDOW = 3 -- seconds
 
+-- Abandon every outstanding arm. This is the "stop caring" path, NOT part of the
+-- correction flow: components/frame.lua's OnHide calls it because a closed window
+-- has no page to correct onto. CorrectPendingDeposit deliberately does not --
+-- see ConsumePendingDeposit and the note above CorrectPendingDeposit itself.
 function ExtBank:ClearPendingDeposit()
 	self.pendingDeposits = nil
+end
+
+-- Spend exactly one arm: one right-click's worth of "waiting for an answer".
+--
+-- Oldest first. The server answers in the order it received, and one packet
+-- carries one move (measured -- every response in a six-deposit burst was its own
+-- packet), so the oldest outstanding click is the one any given answer is about.
+function ExtBank:ConsumePendingDeposit()
+	local pending = self.pendingDeposits
+	if not pending or #pending == 0 then return end
+
+	table.remove(pending, 1)
+
+	if #pending == 0 then
+		self.pendingDeposits = nil
+	end
 end
 
 -- A LIST, not a single slot. A player emptying several items into the vault
@@ -153,20 +207,47 @@ end
 
 -- Called from ParsePacket (core/model.lua) with the list of cells that packet
 -- put items into, once the model has caught up with whatever the server did in
--- response to a deposit HookInventoryDepositWatch below saw coming. A no-op most
--- of the time: nothing armed, the click didn't actually result in a deposit
--- (e.g. the item wasn't vault-eligible), or it already landed on the page the
--- player is looking at.
+-- response to a deposit HookInventoryDepositWatch below saw coming.
+--
+-- It no-ops when nothing is armed, when the click didn't actually result in a
+-- deposit (e.g. the item wasn't vault-eligible), or when the item already landed
+-- on the page being looked at -- but per this file's header, that last case means
+-- specifically "the current page includes ext bag 0". Off such a page this runs
+-- on essentially every deposit, so treat it as a hot path, not an edge case.
 --
 -- Bounded by the number of live arms, and that bound is load-bearing rather
 -- than tidiness: a kind == 0 snapshot reports every occupied cell as newly
 -- gained, because ClearModel wipes the model before the cell list is applied.
 -- Without the bound, one armed click answered by a full refresh would march the
 -- entire vault onto the current page.
+--
+-- ARM LIFECYCLE -- an arm dies only by being SPENT on an answer, or by ageing
+-- out of DEPOSIT_RESPONSE_WINDOW. It is never spent merely because a packet
+-- arrived, and this is the whole point:
+--
+-- An earlier version opened with an unconditional ClearPendingDeposit(), which
+-- destroyed every arm on EVERY packet. That made the correction self-defeating,
+-- because our own relocation's result is itself a packet: the echo landed while
+-- the NEXT click's arm was live, wiped it, then did nothing (its cell is on the
+-- current page -- we just put it there), and that next click's own deposit
+-- packet then found nothing armed. Measured in a six-deposit burst, deposits 2
+-- and 5 were silently left on the wrong page for exactly this reason, in an
+-- alternating pattern: every correction killed the fix queued behind it.
+--
+-- So the rule is by DESTINATION, not by packet:
+--   off-page gained cell -> answers an armed click: spend one arm, relocate it
+--   on-page gained cell  -> spend NOTHING. It is either our own echo (always
+--                           on-page, since our corrections target the current
+--                           page by construction) or a deposit that already
+--                           landed where the player is looking and needs no
+--                           action. Neither wants an arm.
+--
+-- The cost of that asymmetry is an unspent arm lingering up to the window when a
+-- deposit lands on-page. That only loosens the snapshot bound slightly, and it
+-- fails in the safe direction -- unlike spending arms on echoes, which drops
+-- real corrections on the floor.
 function ExtBank:CorrectPendingDeposit(gained)
 	local arms = self:HasPendingDeposits()
-	self:ClearPendingDeposit()
-
 	if arms == 0 or not gained then return end
 
 	-- ParsePacket calls us BEFORE it broadcasts EXTBANK_MODEL_UPDATED, so the
@@ -187,7 +268,12 @@ function ExtBank:CorrectPendingDeposit(gained)
 
 		local landed = gained[i]
 		if not self:IsBagOnCurrentPage(landed.bagIndex) then
+			-- Spent here, BEFORE working out whether anything can be done about
+			-- it. A deposit we can't relocate has still been answered; leaving
+			-- its arm live would have the next packet retry a correction for an
+			-- item already given up on, and re-print the message with it.
 			arms = arms - 1
+			self:ConsumePendingDeposit()
 
 			local dstBag, dstSlot, why = self:GetCurrentPageFreeSlot(claimed)
 			if not dstBag then

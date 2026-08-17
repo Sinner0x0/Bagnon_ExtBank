@@ -28,9 +28,19 @@ git config core.hooksPath .githooks        # one-time, enables the hooks below
 ```
 
 There is **no test suite**. Verification is the Lua 5.1 syntax check plus testing
-in the live client. Neither `lua`/`luac5.1` nor `zip` is typically installed on the
-Windows dev box, so both of those effectively run in CI only — do not claim a Lua
-change is verified without saying where it was checked.
+in the live client.
+
+The syntax check needs a **5.1** parser specifically — `luac5.1 -p`, matching the
+`lua5.1` package CI installs. A newer Lua is worse than none here: a 5.4 parser
+happily accepts the `goto` and integer division the 3.3.5a client rejects, so it
+passes files the game cannot load. `build.sh` additionally needs `zip`. Neither
+tool is required to work on the addon — CI runs both on every PR — so check what
+is actually available before claiming a change was verified locally.
+
+The syntax check only proves a file *parses*. There are no WoW API stubs here, so
+anything touching Bagnon's classes or the ebonhold packet path is verified only by
+loading it in the client — do not claim a change is verified without saying where
+it was checked.
 
 `build.sh` derives the shipped file list from the `.toc`, following `<Script>`/
 `<Include>` refs through the XMLs, and fails if a referenced file is missing. Adding
