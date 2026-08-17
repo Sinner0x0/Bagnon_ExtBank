@@ -419,3 +419,85 @@ here rather than changed.
 
 *Dispositioned 2026-08-17 from probe logs; stacks reproduced on the X-button and
 walk-away routes as controls.*
+
+---
+
+## 10. Hooking `_G.ExtBankMove` once, at load, silently stops working
+
+**Where:** [`main.lua`](../main.lua) — `ExtBank:Move`.
+
+**What looks reasonable.** `ExtBank:Move` re-resolves `_G.ExtBankMove` inside the
+`type(...) == 'function'` guard on **every single call**, rather than caching the
+function once — the pattern every other native wrapper here follows would suggest
+hoisting it into a local at `OnEnable` or file load, the same way `_G.ExtBankUnlock`
+looks cacheable right next to it. That reads like a missed tidy-up, and it is the
+first thing the next person to touch this file will be tempted to "fix".
+
+**Why it stays exactly as written.** `ebonhold.dll` re-registers `_G.ExtBankMove` as
+a brand-new function object on **every `SMSG_EXTBANK_UPDATE`** — not once at load,
+not once per session. Measured with a probe wrapper across multiple sessions: every
+mid-session re-arm landed within 1ms of a `PKT` line with no exceptions, and a
+wrapper installed once at open time was reliably displaced by the very first
+snapshot packet, which arrives roughly 100ms after the window opens — before a
+player could plausibly have deposited anything yet. `_G.ExtBankOpen`, a DLL native
+hooked the identical way, showed no such behaviour, so this is specific to
+`ExtBankMove` and not a general "you cannot hook a DLL native" problem.
+
+Caching the global in a local would silently break under exactly this condition: it
+would work for calls made before the first snapshot lands, then start calling a
+stale, disconnected function object the DLL no longer routes anywhere — the item
+picked up, the move simply never happening, and nothing in Lua to point at why.
+
+**This addon is unaffected precisely because it does the "wrong-looking" thing.**
+Reading `_G.ExtBankMove` fresh at call time, on every call, is what makes
+re-registration invisible here. Any refactor toward caching it is the regression,
+not the fix.
+
+**Reopen if:** a future measurement shows the DLL has stopped re-registering the
+global — that needs a fresh multi-session probe run to establish, not just an
+absence of trouble in casual play.
+
+*Established from a probe run against the live server, 2026-08-17.*
+
+---
+
+## 11. Bag-strip slots don't refuse a drop onto an occupied slot client-side
+
+**Where:** [`components/bag.lua`](../components/bag.lua) — `Bag:DropCarriedBag`.
+
+**What gets flagged.** [`components/item.lua`](../components/item.lua)'s content
+cells refuse a drop onto an occupied cell before any packet goes out
+(`ItemSlot:RefuseIfOccupied`, added in `d2d57d0` after probing showed the server
+rejects an occupied-cell move outright — no swap, no merge). `Bag:DropCarriedBag`
+has no equivalent: it verifies the cursor source and calls `EquipBagToSlot`
+unconditionally, even though `Bag:IsEquipped()` is right there to check against.
+The bag-slot strip (`HDR_BAG`, bag 19) is a genuinely separate address space from
+the content bags, so the cells' finding does not automatically cover it, and the
+asymmetry reads like the same gap left half-closed.
+
+**Investigated in-game, 2026-08-17.** Dragging a second bag onto a strip slot that
+already holds one is refused by the server outright, with an explicit UI message
+that the slot is occupied — no swap. The carried bag simply falls back into the
+player's inventory via the existing unconditional `ClearCursor()` in
+`DropCarriedBag`. Unlike the silent content-cell case this refusal comes back with
+clear player-facing feedback, so there is no "the interaction looks like it worked"
+failure mode here to guard against.
+
+**Deliberately not mirrored client-side.** A few lines using `IsEquipped()` would
+make the two drop targets behave identically — instant refusal instead of a round
+trip and a bag flying back a moment later — but that is a UX-polish difference, not
+a correctness one, and adding it was weighed and declined: nothing is lost, stuck,
+or silently wrong today without it.
+
+**Not fully settled:** the confirmed case dropped onto a strip slot holding an
+*empty* bag. Whether the refusal is unconditional on the slot being occupied, or
+the server would behave differently once the occupied bag holds items, was not
+tested — the empty-target result already answered the question that mattered for
+the decision above, so the contents case was never run. Do not read this entry as
+proof of that case.
+
+**Reopen if:** a swap or a lossy accept is ever observed against a bag-strip slot
+whose occupant has contents, or the round-trip UX becomes a real complaint rather
+than a theoretical one.
+
+*Investigated in-game 2026-08-17.*
