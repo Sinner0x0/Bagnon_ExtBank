@@ -63,8 +63,10 @@ function ExtBank:HookCursorTracking()
 
 	-- The shift-drag split, which the comment below already named as a way the
 	-- cursor gets loaded behind this file's back. Recording `count` is what
-	-- lets GetVerifiedCursorSource tell a partial stack from a whole one --
-	-- see the refusal there for why that distinction has to be made.
+	-- makes a partial deposit possible at all: it is the only place the carried
+	-- amount is observable, and it rides on cursorSrc all the way to the
+	-- ExtBankMove call. Absent for a whole-stack pickup, which is what keeps
+	-- that case sending the 0 ("everything") sentinel.
 	hooksecurefunc('SplitContainerItem', function(bag, slot, count)
 		if CursorHasItem() then
 			ExtBank.cursorSrc = { bag = bag, slot = slot, count = count }
@@ -134,27 +136,30 @@ function ExtBank:GetVerifiedCursorSource()
 		return nil
 	end
 
-	-- Refused rather than deposited, because a partial stack is the one case
-	-- the link check above cannot catch and this addon cannot yet honour.
+	-- No partial-stack check here, and that is a deliberate reversal of what this
+	-- function used to do.
 	--
-	-- The check passes for a split: a shift-drag leaves the REMAINDER sitting in
-	-- the source slot reporting a byte-identical link, so "what's on the cursor
-	-- still matches what that slot says" is true even though the player is
-	-- carrying 5 of a 20-stack. Every caller then reaches ExtBank:Move without a
-	-- count, which sends ExtBankMove(..., 0) -- and 0 means the whole stack. So
-	-- asking to deposit 5 silently moved all 20.
+	-- A split is invisible to the link check above: a shift-drag leaves the
+	-- REMAINDER in the source slot reporting a byte-identical link, so "what's on
+	-- the cursor still matches what that slot says" is true even while the player
+	-- carries 5 of an 18-stack. This used to refuse that drop outright, because
+	-- callers reached ExtBank:Move without a count, which sends
+	-- ExtBankMove(..., 0) -- and 0 means the whole stack, so asking to deposit 5
+	-- silently moved all 18.
 	--
-	-- Depositing the right amount means sending a real count, and the server's
-	-- count semantics have never been probed (the accepted source-bag range in
-	-- IsAcceptedSource above was probed, deliberately, rather than assumed --
-	-- same standard applies here). Guessing wrong moves the wrong quantity just
-	-- as silently, in the other direction. Until someone confirms it against the
-	-- live server, saying no is the honest answer: nothing moves, the item stays
-	-- on the cursor, and the player is told what to do instead.
-	if src.count then
-		UIErrorsFrame:AddMessage('Void Storage: partial stacks can only be deposited whole -- put it back and deposit the full stack', 1, 0.3, 0.3)
-		return nil
-	end
-
+	-- The refusal was a placeholder for a fact nobody had: whether the server
+	-- honours a non-zero count. Nothing in the shipped game ever sends one (all
+	-- seven of extBank.lua's move wrappers hardcode 0), so it could only be
+	-- settled by sending one. It was, against the live server, to the same
+	-- standard as the accepted source-bag range above:
+	--
+	--   SPLIT SplitContainerItem(0, 2, 5)         -- 5 taken off an 18 stack
+	--   MOVE  src= player bag 0 slot 2  dst= extbag 0 slot 13  count=5
+	--   PKT   NEW extbag 0 slot 13  47556 (Crusader Orb) x5    -- 13 left in the bag
+	--
+	-- Count is honoured exactly. So the count now travels with the source
+	-- (components/item.lua passes it to DepositToSlot) and partial deposits work.
+	-- `count` stays nil for a whole-stack pickup, which keeps every other caller
+	-- sending the 0 sentinel unchanged.
 	return src
 end

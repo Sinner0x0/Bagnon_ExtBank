@@ -221,13 +221,28 @@ end
 
 -- Targeted variants used by drag & drop onto a specific slot/cell, as
 -- opposed to the "first free slot anywhere" wrappers above.
+--
+-- Every one of these needs its destination to be EMPTY. The server rejects a
+-- move into an occupied cell outright -- it does not swap, and it does not merge
+-- two stacks of the same item. It answers with a UI error and sends no
+-- SMSG_EXTBANK_UPDATE at all, so nothing here ever hears about it and the
+-- interaction just appears to have worked. Probed against the live server with
+-- all three shapes (partial stack, whole stack of the same item, a different
+-- item), and all three were refused identically.
+--
+-- components/item.lua is where that is caught, before the packet goes out --
+-- it is the caller that knows what the target cell holds.
 
 function ExtBank:EquipBagToSlot(bag, slot, bagIndex)
 	self:Move(bag, slot, self.HDR_BAG, bagIndex)
 end
 
-function ExtBank:DepositToSlot(bag, slot, bagIndex, cellSlot)
-	self:Move(bag, slot, self.CONTENT_BASE + bagIndex, cellSlot)
+-- `count` is the number of items to move, nil/0 meaning the whole stack. The
+-- server honours it (probed -- see core/cursor.lua's GetVerifiedCursorSource),
+-- and only the split-drag path passes one; every other caller omits it and
+-- keeps sending the sentinel.
+function ExtBank:DepositToSlot(bag, slot, bagIndex, cellSlot, count)
+	self:Move(bag, slot, self.CONTENT_BASE + bagIndex, cellSlot, count)
 end
 
 function ExtBank:MoveWithinVault(srcBagIndex, srcSlot, dstBagIndex, dstSlot)

@@ -251,6 +251,31 @@ function ItemSlot:OnReceiveDrag()
 	self:DropCarriedItem()
 end
 
+-- The server refuses any move whose destination cell is already occupied. It
+-- does not swap the two items and it does not merge two stacks of the same one;
+-- it answers with a UI error and sends no SMSG_EXTBANK_UPDATE, so from this
+-- addon's side the move simply never happens and nothing marks it as failed.
+-- Probed against the live server with all three shapes -- a partial stack onto
+-- the same item, a whole stack onto the same item, and a different item
+-- entirely -- and all three were refused identically.
+--
+-- Caught here rather than left to the server because this is where the target
+-- cell's contents are known, so the answer costs nothing and arrives before the
+-- gesture is over. The native UI does not do this (extBank.lua's DropIntoCell
+-- calls DepositToSlot and then ClearCursor() unconditionally, whatever the cell
+-- holds) -- a deliberate divergence from the mirror, and a safe one: it changes
+-- only what this addon declines to send.
+--
+-- Returns true if the drop was refused, in which case the caller must stop.
+function ItemSlot:RefuseIfOccupied()
+	if not self:GetCellData() then
+		return false
+	end
+
+	UIErrorsFrame:AddMessage('Void Storage: that slot is taken -- drop it on an empty one', 1, 0.3, 0.3)
+	return true
+end
+
 -- Drops whatever's being carried onto this cell: a real inventory item on
 -- the cursor deposits into this exact slot; a virtual pick from elsewhere
 -- in the vault moves here instead. Returns true if it handled anything.
@@ -266,6 +291,10 @@ function ItemSlot:DropCarriedItem()
 		-- has forgotten making it. Confirmed in-game.
 		ExtBank:ClearPick()
 
+		if self:RefuseIfOccupied() then
+			return true
+		end
+
 		-- A refusal (see GetVerifiedCursorSource in core/cursor.lua -- unknown or
 		-- mismatched source) deliberately leaves the item ON the cursor rather
 		-- than ClearCursor()-ing it: the drop didn't happen, so the player
@@ -275,15 +304,40 @@ function ItemSlot:DropCarriedItem()
 		-- something's being carried.
 		local src = ExtBank:GetVerifiedCursorSource()
 		if src then
-			ExtBank:DepositToSlot(src.bag, src.slot, self.bagIndex, self.slot)
+			-- src.count is nil for a whole-stack pickup and the carried amount for
+			-- a shift-drag split, so this sends the 0 ("everything") sentinel
+			-- exactly where it always did.
+			ExtBank:DepositToSlot(src.bag, src.slot, self.bagIndex, self.slot, src.count)
 			ClearCursor()
 			ExtBank.cursorSrc = nil
 		end
 		return true
 	elseif ExtBank.pickSrc then
 		local src = ExtBank.pickSrc
-		ExtBank:MoveWithinVault(src.bagIndex, src.slot, self.bagIndex, self.slot)
+
+		-- Spent before the occupied check, not after. Unlike the cursor above, a
+		-- pick has NO visual cue (see core/cursor.lua), so leaving one armed
+		-- through a refusal is the dangerous option: the player gets a message,
+		-- reasonably reads it as "that didn't happen", and the next click on any
+		-- cell silently completes the old move instead of picking up what was
+		-- clicked. The gesture ends here either way.
 		ExtBank:ClearPick()
+
+		-- Dropped back on the cell it came from. Silent, and checked BEFORE the
+		-- occupied test, which would otherwise fire on it -- the origin is
+		-- occupied by definition, by the very item being carried. Nothing moved
+		-- and nothing failed, so there is nothing to say; this used to send a
+		-- self-to-self move to the server instead, which is what OnDragStop's
+		-- own origin-cell comment above refers to.
+		if src.bagIndex == self.bagIndex and src.slot == self.slot then
+			return true
+		end
+
+		if self:RefuseIfOccupied() then
+			return true
+		end
+
+		ExtBank:MoveWithinVault(src.bagIndex, src.slot, self.bagIndex, self.slot)
 		return true
 	end
 
