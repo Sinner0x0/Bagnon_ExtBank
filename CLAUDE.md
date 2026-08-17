@@ -14,8 +14,12 @@ Bagnon` guarantees it is loaded first, and every file opens with
 `local Bagnon = LibStub('AceAddon-3.0'):GetAddon('Bagnon')`.
 
 The repo root **is** the addon folder, and is often cloned directly into
-`Interface\AddOns\Bagnon_ExtBank`. `docs/` and `.githooks/` are dev-only and do
-not ship.
+`Interface\AddOns\Bagnon_ExtBank`. `.githooks/` is dev-only and does not ship.
+Most of `docs/` **does** ship, so a zip install matches a clone: `non-issues.md`
+because shipped source cites it by relative path in four places, and `images/`
+because the shipped `README.md` embeds them. Dated review snapshots (`review-*.md`) do
+not — `build.sh` names `non-issues.md` explicitly and derives the images from the
+README's own `src=` refs, so nothing else in `docs/` is picked up by accident.
 
 ## Commands
 
@@ -113,9 +117,12 @@ whatever the model held at its last `OnShow`.
    `ExtBank_Open` / `ExtBank_Close` are plain globals that ProjectEbonhold assigns
    unconditionally — one owner each. Capture the previous value, call it, then run
    ours. Must wait for `PLAYER_LOGIN`; addon load order is not guaranteed.
-2. **`hooksecurefunc`** (`PickupContainerItem`, `UseContainerItem`, and the native
-   frames' `Show` → `Hide`). Allows unlimited independent listeners, so it stacks
-   safely alongside ProjectEbonhold's own hooks.
+2. **`hooksecurefunc`** (`PickupContainerItem`, `SplitContainerItem`,
+   `UseContainerItem`, and the native frames' `Show` → `Hide`). Allows unlimited
+   independent listeners, so it stacks safely alongside ProjectEbonhold's own
+   hooks. `SplitContainerItem` (`core/cursor.lua`) is the only writer of
+   `cursorSrc.count`, which is what decides whether a shift-drag deposits 5 of a
+   stack or all 18 — don't audit the hook surface without it.
 3. **Monkeypatching vendored Bagnon classes**, always in this shape:
 
    ```lua
@@ -196,8 +203,10 @@ bag** (`GetBagsPerPage()`), never splitting a bag across pages.
 `GetCurrentPageBags()` is the page slice that actually gets built and laid out.
 `currentPage` is intentionally not persisted.
 
-Layout is **deferred**: `RequestLayout()` sets a flag and shows a one-shot
-`OnUpdate` frame that applies `Layout()` next frame. `EXTBANK_MODEL_UPDATED`
+Layout is **deferred**: `RequestLayout()` shows a one-shot `OnUpdate` frame that
+applies `Layout()` next frame. There is deliberately no flag alongside that
+`Show()` — it was a second copy of `throttledUpdater:IsShown()` and was removed;
+see the note at the updater in `components/itemFrame.lua`. `EXTBANK_MODEL_UPDATED`
 arrives in bursts, and re-anchoring every slot synchronously per message tore down
 the tooltip under the mouse. `ItemFrame:OnSizeChanged` → `ITEM_FRAME_SIZE_CHANGE`
 is what lets the outer frame catch up afterwards.

@@ -16,6 +16,13 @@ If you are a reviewer and you have landed here from a code comment: the entry
 below is an argument, not a rule. If you can supply the evidence in its *Reopen
 if* section, the verdict changes.
 
+Orientation for the paths below. `core/…` and `components/…` are this addon,
+one directory up from here. `../Bagnon`, `../Bagnon_Config` and "the vendored
+fork" mean the Bagnon addon folder sitting *beside* this one — true whether that
+is a dev checkout or `Interface\AddOns`, since Bagnon installs as a sibling.
+`extBank.lua` is ProjectEbonhold's own vault module, which ships inside the
+client rather than on disk.
+
 ---
 
 ## The mirroring policy, once

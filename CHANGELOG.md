@@ -11,7 +11,7 @@ publishes a release, so the entry below it should land in the same change.
 
 Nothing yet.
 
-## [1.0.0] — 2026-08-16
+## [1.0.0] — 2026-08-17
 
 First release. Replaces ProjectEbonhold's built-in Void Storage window with a
 Bagnon-style one: all your storage bags merged into a single grid, with the same

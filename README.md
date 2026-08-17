@@ -86,10 +86,14 @@ equipped bags in them makes no difference; only the purchase count matters.)
 Inside the Void Storage window, you can move items between slots two ways:
 
 - **Click, then click again**: left-click an item to pick it up, then
-  left-click an empty (or occupied) slot to drop it there. Works with Paging feature.
+  left-click an empty slot to drop it there. Works with Paging feature.
 - **Click and drag**: hold the left mouse button down on an item and drag
   it to another slot, then let go — same as dragging items in your regular
   bags. Works with Paging feature.
+
+Either way, the slot you drop on has to be **empty**. Void Storage has no swap
+and no stack-merge, so dropping onto a slot that already holds something is
+refused and nothing moves.
 
 To take an item **out** of Void Storage and put it back in your bags:
 - **Right-click it** (or shift-click it) while it's in the Void Storage

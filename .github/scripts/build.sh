@@ -77,8 +77,30 @@ while [ ${#QUEUE[@]} -gt 0 ]; do
 done
 
 # Files that ship but are not referenced by the .toc. LICENSE is required by the
-# MIT terms; README.md is what a user reads after extracting.
-EXTRAS=("$TOC" LICENSE README.md)
+# MIT terms; README.md is what a user reads after extracting; non-issues.md ships
+# because shipped source cites it by relative path -- four times, across
+# core/model.lua (x2), core/nativeHooks.lua and components/frameOptions.lua --
+# and a dead pointer makes those dispositions unverifiable for anyone reading the
+# source out of the zip.
+EXTRAS=("$TOC" LICENSE README.md docs/non-issues.md)
+
+# Whatever the shipped README embeds, so its images resolve offline from the
+# extracted folder rather than needing a network round trip to GitHub. Derived
+# from README.md rather than hardcoded for exactly the reason the code list is
+# derived from the .toc: a hardcoded list silently ships a README with a broken
+# image the first time a screenshot is added and the list is not updated.
+# Restricted to docs/ so an absolute http(s) src is skipped rather than treated
+# as a missing file.
+readme_assets() {
+  grep -o 'src="[^"]*"' README.md 2>/dev/null \
+    | sed 's/^src="//; s/"$//' \
+    | tr '\\' '/' \
+    | grep '^docs/' || true
+}
+
+while IFS= read -r asset; do
+  [ -n "$asset" ] && EXTRAS+=("$asset")
+done < <(readme_assets)
 
 # --- stage and zip ----------------------------------------------------------
 rm -rf build dist
