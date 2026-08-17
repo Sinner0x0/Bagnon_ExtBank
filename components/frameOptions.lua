@@ -36,7 +36,7 @@ watcher:SetScript('OnEvent', function(self, event, addonName)
 	local super_Initialize = dropdown.Initialize
 	dropdown.Initialize = function(self)
 		super_Initialize(self)
-		self:AddItem('Void Storage', 'extbank')
+		self:AddItem('Void Storage', Bagnon.ExtBank.FRAME_ID)
 	end
 
 	-- "Enable Bag Frame" and "Enable Sort Button" are both grayed out for this
@@ -126,10 +126,20 @@ watcher:SetScript('OnEvent', function(self, event, addonName)
 		button1 = CLOSE,
 		hasEditBox = true,
 		editBoxWidth = 350,
+		-- `self.editBox` is the Cataclysm-era StaticPopup instance field; 3.3.5a's
+		-- own StaticPopup implementation resolves the edit box by global name
+		-- instead ($parentEditBox). Take whichever is actually there rather than
+		-- betting on one: on the wrong client the field is nil, and this handler
+		-- is invoked from inside Blizzard's StaticPopup_OnShow, so indexing it
+		-- throws out of THEIR code and leaves a half-built popup with no URL in
+		-- it -- for the one control whose entire job is to hand the player a URL.
 		OnShow = function(self)
-			self.editBox:SetText(GITHUB_URL)
-			self.editBox:HighlightText()
-			self.editBox:SetFocus()
+			local editBox = self.editBox or _G[self:GetName() .. 'EditBox']
+			if not editBox then return end
+
+			editBox:SetText(GITHUB_URL)
+			editBox:HighlightText()
+			editBox:SetFocus()
 		end,
 		EditBoxOnEscapePressed = function(self) self:GetParent():Hide() end,
 		EditBoxOnEnterPressed = function(self) self:GetParent():Hide() end,
@@ -194,7 +204,7 @@ watcher:SetScript('OnEvent', function(self, event, addonName)
 	bagsPerPage:Hide()
 
 	local function UpdateExtBankWidgets(panel)
-		local isExtBank = panel:GetFrameID() == 'extbank'
+		local isExtBank = panel:GetFrameID() == Bagnon.ExtBank.FRAME_ID
 
 		if isExtBank then
 			headerText:Show()

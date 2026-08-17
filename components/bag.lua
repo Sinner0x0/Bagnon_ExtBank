@@ -20,11 +20,20 @@ do
 	function Bag:New(bagIndex, frameID, parent)
 		nextID = nextID + 1
 
-		local bag = self:Bind(CreateFrame('CheckButton', 'BagnonExtBankBag' .. nextID, parent, 'ItemButtonTemplate'))
+		local name = 'BagnonExtBankBag' .. nextID
+		local bag = self:Bind(CreateFrame('CheckButton', name, parent, 'ItemButtonTemplate'))
 		bag:SetWidth(Bag.SIZE)
 		bag:SetHeight(Bag.SIZE)
 		bag.bagIndex = bagIndex
 		bag:SetFrameID(frameID)
+
+		-- Looked up once. ItemButtonTemplate names this region $parentIconTexture
+		-- and never replaces it, so re-deriving it inside Update -- a GetName()
+		-- call, a string concat and a _G probe, on all 70 buttons on every
+		-- packet -- was pure repeat work. (The old `or _G[name..'Icon']`
+		-- fallback went with it: that spelling belongs to later templates, and
+		-- on 3.3.5 it could only ever be nil.)
+		bag.icon = _G[name .. 'IconTexture']
 
 		-- ItemButtonTemplate has no checked texture of its own (stock bag
 		-- slot buttons are never toggles) -- add one so a shown/hidden bag
@@ -36,8 +45,15 @@ do
 		bag:SetCheckedTexture(checked)
 
 		bag:RegisterForClicks('anyUp')
-		bag:RegisterForDrag('LeftButton')
 
+		-- Deliberately NOT RegisterForDrag'd. There is no OnDragStart here
+		-- (unlike the item cells, which set both OnDragStart and OnDragStop),
+		-- and once the client promotes a left press-and-move into a drag the
+		-- mouse-up stops producing OnClick -- so a click with a few pixels of
+		-- pointer drift silently did nothing at all: no contents toggle, no
+		-- right-click unequip, and no UpdateChecked, which OnClick is the only
+		-- path to. Receiving a dropped bag doesn't need it either; OnReceiveDrag
+		-- is delivered on mouse focus regardless.
 		bag:SetScript('OnEnter', bag.OnEnter)
 		bag:SetScript('OnLeave', bag.OnLeave)
 		bag:SetScript('OnClick', bag.OnClick)
@@ -118,60 +134,52 @@ function Bag:OnEnter()
 	self:RefreshTooltip()
 end
 
-function Bag:OnLeave()
-	if GameTooltip:IsOwned(self) then
-		GameTooltip:Hide()
-	end
-end
-
-function Bag:AnchorTooltip()
-	if self:GetRight() > (GetScreenWidth() / 2) then
-		GameTooltip:SetOwner(self, 'ANCHOR_LEFT')
-	else
-		GameTooltip:SetOwner(self, 'ANCHOR_RIGHT')
-	end
-end
+-- OnLeave, AnchorTooltip and RefreshTooltipIfOwned all come from
+-- Bagnon.ExtBankWidget (components/widget.lua), shared with item.lua.
 
 
 --[[ Update Methods ]]--
 
-function Bag:Update()
-	local icon = _G[self:GetName() .. 'IconTexture'] or _G[self:GetName() .. 'Icon']
+local EMPTY_BAG_TEXTURE = [[Interface\PaperDoll\UI-PaperDoll-Slot-Bag]]
 
-	if self:IsLocked() then
-		if icon then
-			icon:SetTexture([[Interface\PaperDoll\UI-PaperDoll-Slot-Bag]])
-			icon:SetDesaturated(true)
-		end
-		self:SetAlpha(0.55)
+function Bag:Update()
+	local locked = self:IsLocked()
+	local data = (not locked) and self:GetBagData() or nil
+	local itemId = data and data.itemId or nil
+
+	-- The checked ring is driven on its own, outside the cache below, because
+	-- OnClick and OnSlotShownChanged both reach UpdateChecked directly --
+	-- folding it into the cached state would let those two paths desync it.
+	if locked then
 		self:SetChecked(false)
-		self:RefreshTooltipIfOwned()
+	else
+		self:UpdateChecked()
+	end
+
+	-- Everything past here is the icon and alpha work, and that is what
+	-- actually costs something: all 70 buttons run this on every
+	-- EXTBANK_MODEL_UPDATED, and for a typical player the 62-70 LOCKED ones
+	-- were rewriting the same constant texture, the same desaturation and the
+	-- same alpha every single packet. The tooltip refresh belongs on this side
+	-- of the check too -- its text is a function of exactly these two values.
+	if self.shownLocked == locked and self.shownItemId == itemId then
 		return
 	end
+	self.shownLocked, self.shownItemId = locked, itemId
 
-	local data = self:GetBagData()
+	local icon = self.icon
 	if icon then
-		if data then
-			icon:SetTexture(GetItemIcon(data.itemId) or [[Interface\Icons\INV_Misc_QuestionMark]])
-			icon:SetDesaturated(false)
+		if locked then
+			icon:SetTexture(EMPTY_BAG_TEXTURE)
+			icon:SetDesaturated(true)
 		else
-			icon:SetTexture([[Interface\PaperDoll\UI-PaperDoll-Slot-Bag]])
+			icon:SetTexture(itemId and (GetItemIcon(itemId) or [[Interface\Icons\INV_Misc_QuestionMark]]) or EMPTY_BAG_TEXTURE)
 			icon:SetDesaturated(false)
 		end
 	end
-	self:SetAlpha(1)
-	self:UpdateChecked()
-	self:RefreshTooltipIfOwned()
-end
 
--- Losing the UpdateTooltip name also loses the incidental refresh that
--- Blizzard's poll was giving us, so redraw explicitly when the model changes
--- under a hovered slot (unequip via right-click, a purchase unlocking this
--- one) -- same as item.lua's Update does for cells.
-function Bag:RefreshTooltipIfOwned()
-	if GameTooltip:IsOwned(self) then
-		self:RefreshTooltip()
-	end
+	self:SetAlpha(locked and 0.55 or 1)
+	self:RefreshTooltipIfOwned()
 end
 
 function Bag:UpdateChecked()
@@ -228,14 +236,6 @@ function Bag:IsLocked()
 	return (self.bagIndex + 1) > ExtBank.unlockedBags
 end
 
-function Bag:SetFrameID(frameID)
-	self.frameID = frameID
-end
 
-function Bag:GetFrameID()
-	return self.frameID
-end
-
-function Bag:GetSettings()
-	return Bagnon.FrameSettings:Get(self:GetFrameID())
-end
+-- SetFrameID/GetFrameID/GetSettings, plus the tooltip trio above.
+Bagnon.ExtBankWidget:Apply(Bag)

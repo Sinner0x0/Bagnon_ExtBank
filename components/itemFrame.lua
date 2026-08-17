@@ -25,11 +25,12 @@ ItemFrame.ITEM_SIZE = 39
 -- tooltip down mid-hover. Collapsing any burst into a single deferred pass
 -- (shown this frame, applies and hides itself the next) fixes that.
 local function throttledUpdater_OnUpdate(self)
-	local p = self:GetParent()
-	if p:NeedsLayout() then
-		p:Layout()
-	end
+	-- Hidden BEFORE the layout runs, not after. A RequestLayout() issued from
+	-- inside Layout() -- or from anything it synchronously triggers, and it
+	-- triggers a good deal -- then re-shows this and gets a pass of its own next
+	-- frame, instead of being swallowed by a Hide() that came afterwards.
 	self:Hide()
+	self:GetParent():Layout()
 end
 
 function ItemFrame:New(frameID, parent)
@@ -99,41 +100,32 @@ end
 -- which core/nativeHooks.lua's ExtBank_OnPacket hook feeds. So there is no
 -- event lane here, and no OnEvent dispatcher to go with it.
 
+-- Not frameID-guarded, unlike everything below it: the vault model is a single
+-- global thing, so ParsePacket broadcasts without one (core/model.lua).
 function ItemFrame:EXTBANK_MODEL_UPDATED()
 	self:UpdateEverything()
 end
 
-function ItemFrame:BAG_SLOT_SHOW(msg, frameID, bagIndex)
+-- Everything that changes WHICH bags belong on this page. The set of item
+-- slots that should exist can change, so these need a full reload, not just a
+-- reposition of the slots already built.
+--
+-- SLOT_ORDER_UPDATE belongs here rather than with the relayout messages below,
+-- which is a behaviour fix and not just tidying: core's GetVisibleBagSlots
+-- (Bagnon/components/frameSettings.lua) returns a REVERSED iterator when that
+-- setting is on, and this frame paginates by slicing that order -- so flipping
+-- it moves bags between pages. Routed to RequestLayout, as it used to be, the
+-- layout asked GetItemSlot() for cells belonging to bags that had just arrived
+-- on this page, got nil for every one of them, and silently drew nothing until
+-- some unrelated message forced a reload.
+function ItemFrame:OnBagSetChanged(msg, frameID)
 	if frameID == self:GetFrameID() then
 		self:UpdateEverything()
 	end
 end
 
-function ItemFrame:BAG_SLOT_HIDE(msg, frameID, bagIndex)
-	if frameID == self:GetFrameID() then
-		self:UpdateEverything()
-	end
-end
-
-function ItemFrame:ITEM_FRAME_SPACING_UPDATE(msg, frameID)
-	if frameID == self:GetFrameID() then
-		self:RequestLayout()
-	end
-end
-
-function ItemFrame:ITEM_FRAME_COLUMNS_UPDATE(msg, frameID)
-	if frameID == self:GetFrameID() then
-		self:RequestLayout()
-	end
-end
-
-function ItemFrame:SLOT_ORDER_UPDATE(msg, frameID)
-	if frameID == self:GetFrameID() then
-		self:RequestLayout()
-	end
-end
-
-function ItemFrame:ITEM_FRAME_BAG_BREAK_UPDATE(msg, frameID)
+-- Everything that only moves the existing slots around.
+function ItemFrame:OnLayoutSettingChanged(msg, frameID)
 	if frameID == self:GetFrameID() then
 		self:RequestLayout()
 	end
@@ -155,9 +147,13 @@ end
 
 -- Text search is a single addon-wide filter shared by every Bagnon window,
 -- not scoped to a frameID -- same as core Bagnon's own item slots.
+-- The search string is read once here and handed down, rather than each cell
+-- fetching it for itself: this fires on every KEYSTROKE and loops every live
+-- cell, so a full page was 180 Settings lookups per character typed.
 function ItemFrame:TEXT_SEARCH_UPDATE()
+	local search = Bagnon.Settings:GetTextSearch()
 	for _, itemSlot in pairs(self.itemSlots) do
-		itemSlot:UpdateSearch()
+		itemSlot:UpdateSearch(search)
 	end
 end
 
@@ -205,7 +201,17 @@ end
 -- OnSizeChanged->message bridge for the same reason; the outer Frame class
 -- already listens for ITEM_FRAME_SIZE_CHANGE (it's core's, inherited
 -- unchanged), it just never had anything telling it to fire for us.
+-- Suppressed while ApplySize (below) is mid-write. WoW fires OnSizeChanged
+-- synchronously from SetWidth, so a plain SetWidth-then-SetHeight pair sent
+-- this message with the width already updated and the height still holding the
+-- PREVIOUS pass's value -- and this message is not cheap to answer: it reaches
+-- BagFrame:OnItemFrameSizeChange, which re-anchors all 70 strip buttons and
+-- then sends BAG_FRAME_UPDATE_SHOWN, driving a full outer-window Frame:Layout()
+-- through PlaceItemFrame. So every layout pass paid for two complete window
+-- relayouts, the first of them sized from a half-written grid, and on a row
+-- count change that intermediate one is briefly on screen.
 function ItemFrame:OnSizeChanged()
+	if self.applyingSize then return end
 	self:SendMessage('ITEM_FRAME_SIZE_CHANGE', self:GetFrameID())
 end
 
@@ -226,12 +232,15 @@ function ItemFrame:UpdateEvents()
 
 	if self:IsVisible() then
 		self:RegisterMessage('EXTBANK_MODEL_UPDATED')
-		self:RegisterMessage('BAG_SLOT_SHOW')
-		self:RegisterMessage('BAG_SLOT_HIDE')
-		self:RegisterMessage('ITEM_FRAME_SPACING_UPDATE')
-		self:RegisterMessage('ITEM_FRAME_COLUMNS_UPDATE')
-		self:RegisterMessage('SLOT_ORDER_UPDATE')
-		self:RegisterMessage('ITEM_FRAME_BAG_BREAK_UPDATE')
+
+		self:RegisterMessage('BAG_SLOT_SHOW', 'OnBagSetChanged')
+		self:RegisterMessage('BAG_SLOT_HIDE', 'OnBagSetChanged')
+		self:RegisterMessage('SLOT_ORDER_UPDATE', 'OnBagSetChanged')
+
+		self:RegisterMessage('ITEM_FRAME_SPACING_UPDATE', 'OnLayoutSettingChanged')
+		self:RegisterMessage('ITEM_FRAME_COLUMNS_UPDATE', 'OnLayoutSettingChanged')
+		self:RegisterMessage('ITEM_FRAME_BAG_BREAK_UPDATE', 'OnLayoutSettingChanged')
+
 		self:RegisterMessage('ITEM_FRAME_BAGS_PER_PAGE_UPDATE')
 		self:RegisterMessage('TEXT_SEARCH_UPDATE')
 		self:RegisterMessage('SHOW_EMPTY_ITEM_SLOT_TEXTURE_UPDATE')
@@ -242,6 +251,15 @@ end
 --[[ Item Slot Management ]]--
 
 function ItemFrame:UpdateEverything()
+	-- The single invalidation point for the two cached bag lists below, and the
+	-- reason caching them is safe at all: every path that can change which bags
+	-- are visible or which page they fall on routes through here -- the model
+	-- update, the bag show/hide/reorder messages, the bags-per-page change,
+	-- SetCurrentPage, and the drag release. Ahead of the IsVisible() check, so a
+	-- change arriving while the window is hidden can't leave a stale list behind
+	-- for the next open.
+	self:InvalidateVisibleBags()
+
 	if not self:IsVisible() then return end
 
 	-- The set of bags on the current page can shrink out from under the
@@ -273,8 +291,17 @@ function ItemFrame:GetItemSlot(bagIndex, slot)
 	return self.itemSlots[self:GetSlotIndex(bagIndex, slot)]
 end
 
+-- 256, not 100. core/model.lua reads a bag's `size` straight off the wire as an
+-- unsigned byte and nothing clamps it to 36, so a server-side bag of more than
+-- 99 slots would collide: bag 3 slot 100 and bag 4 slot 0 both key to 400, and
+-- ReloadAllItemSlots' `if not itemSlot` check would then treat bag 4's cell as
+-- already built and leave a button still bound to bag 3 sitting in it --
+-- rendering one item and moving a different one on click. A full byte of
+-- headroom retires the assumption rather than restating it.
+local SLOT_INDEX_STRIDE = 256
+
 function ItemFrame:GetSlotIndex(bagIndex, slot)
-	return bagIndex * 100 + slot
+	return bagIndex * SLOT_INDEX_STRIDE + slot
 end
 
 -- Confirmed empirically (not just theorized): Free()'ing a drag's origin
@@ -379,13 +406,29 @@ end
 -- Request a (possibly-deferred) layout pass -- see throttledUpdater_OnUpdate
 -- up in the constructor section for why this doesn't just call Layout()
 -- directly.
+-- The `needsLayout` flag this used to set alongside the Show() was a second
+-- copy of throttledUpdater:IsShown(), and the guard reading it could never be
+-- false: the flag was set on the line before the only Show() in the addon, and
+-- cleared only inside the two Layout_ bodies, which nothing but that one
+-- OnUpdate ever reaches.
 function ItemFrame:RequestLayout()
-	self.needsLayout = true
 	self.throttledUpdater:Show()
 end
 
-function ItemFrame:NeedsLayout()
-	return self.needsLayout
+-- Writes both dimensions before letting anyone hear about either, then sends
+-- the one message -- see OnSizeChanged above for what that message costs.
+-- Sends nothing when neither dimension actually moved, matching what
+-- OnSizeChanged did on its own (WoW does not fire it for a no-op write).
+function ItemFrame:ApplySize(width, height)
+	width, height = math.max(width, 1), math.max(height, 1)
+	if width == self:GetWidth() and height == self:GetHeight() then return end
+
+	self.applyingSize = true
+	self:SetWidth(width)
+	self:SetHeight(height)
+	self.applyingSize = nil
+
+	self:SendMessage('ITEM_FRAME_SIZE_CHANGE', self:GetFrameID())
 end
 
 -- Dispatches to whichever of the two layouts below the "Bag Break Layout"
@@ -404,8 +447,6 @@ end
 -- slots just keep filling left-to-right, wrapping at the column count,
 -- regardless of which bag they belong to.
 function ItemFrame:Layout_Default()
-	self.needsLayout = nil
-
 	local columns = self:NumColumns()
 	local spacing = self:GetSpacing()
 	local effItemSize = self.ITEM_SIZE + spacing
@@ -428,8 +469,7 @@ function ItemFrame:Layout_Default()
 	-- nothing to show at all -- see "Fixed grid width" below.
 	local width = effItemSize * math.max(columns, 1) - spacing
 	local height = effItemSize * math.max(math.ceil(i / columns), 1) - spacing
-	self:SetWidth(math.max(width, 1))
-	self:SetHeight(math.max(height, 1))
+	self:ApplySize(width, height)
 end
 
 --[[ Fixed grid width ]]--
@@ -456,8 +496,6 @@ end
 -- 0-based throughout (to match GetSlotIndex/AddItemSlot's own 0-based bag
 -- and slot numbering), unlike core Bagnon's 1-based Layout_BagBreak.
 function ItemFrame:Layout_BagBreak()
-	self.needsLayout = nil
-
 	local columns = self:NumColumns()
 	local spacing = self:GetSpacing()
 	local effItemSize = self.ITEM_SIZE + spacing
@@ -489,8 +527,7 @@ function ItemFrame:Layout_BagBreak()
 
 	local width = effItemSize * math.max(columns, 1) - spacing
 	local height = effItemSize * math.max(row, 1) - spacing
-	self:SetWidth(math.max(width, 1))
-	self:SetHeight(math.max(height, 1))
+	self:ApplySize(width, height)
 end
 
 
@@ -507,12 +544,30 @@ end
 -- out of. Not itself paginated: NumColumns/the bag-slot strip and anything
 -- else that needs "is there anything to show at all" reads this, only the
 -- item grid's own layout/reload needs the paged-down subset.
+-- Cached, and dropped by InvalidateVisibleBags from UpdateEverything.
+--
+-- Worth caching because of how often one update asks for it: UpdateEverything
+-- reaches it through GetPageCount, then again through ReloadAllItemSlots ->
+-- GetCurrentPageBags, then a frame later through Layout -> GetVisibleBags ->
+-- GetCurrentPageBags, then once more via the ITEM_FRAME_PAGE_UPDATE it sends ->
+-- PageBar:UpdateShown -> GetPageCount. core/deposit.lua adds two more per
+-- correction. Each of those was a fresh list plus a full walk of all 70
+-- settings bag slots, and EXTBANK_MODEL_UPDATED arrives in bursts.
+function ItemFrame:InvalidateVisibleBags()
+	self.visibleBags = nil
+	self.pageBags = nil
+end
+
 function ItemFrame:GetAllVisibleBags()
-	local list = {}
-	for _, bagIndex in self:GetSettings():GetVisibleBagSlots() do
-		if self:GetBagSize(bagIndex) > 0 then
-			table.insert(list, bagIndex)
+	local list = self.visibleBags
+	if not list then
+		list = {}
+		for _, bagIndex in self:GetSettings():GetVisibleBagSlots() do
+			if self:GetBagSize(bagIndex) > 0 then
+				list[#list + 1] = bagIndex
+			end
 		end
+		self.visibleBags = list
 	end
 	return list
 end
@@ -567,14 +622,18 @@ end
 
 -- The slice of GetAllVisibleBags that belongs on the current page.
 function ItemFrame:GetCurrentPageBags()
-	local all = self:GetAllVisibleBags()
-	local perPage = self:GetBagsPerPage()
-	local startIdx = (self:GetCurrentPage() - 1) * perPage + 1
-	local endIdx = math.min(startIdx + perPage - 1, #all)
+	local list = self.pageBags
+	if not list then
+		local all = self:GetAllVisibleBags()
+		local perPage = self:GetBagsPerPage()
+		local startIdx = (self:GetCurrentPage() - 1) * perPage + 1
+		local endIdx = math.min(startIdx + perPage - 1, #all)
 
-	local list = {}
-	for i = startIdx, endIdx do
-		table.insert(list, all[i])
+		list = {}
+		for i = startIdx, endIdx do
+			list[#list + 1] = all[i]
+		end
+		self.pageBags = list
 	end
 	return list
 end
@@ -582,17 +641,8 @@ end
 
 --[[ Frame Properties ]]--
 
-function ItemFrame:SetFrameID(frameID)
-	self.frameID = frameID
-end
-
-function ItemFrame:GetFrameID()
-	return self.frameID
-end
-
-function ItemFrame:GetSettings()
-	return Bagnon.FrameSettings:Get(self:GetFrameID())
-end
+-- SetFrameID/GetFrameID/GetSettings come from Bagnon.ExtBankWidget
+-- (components/widget.lua) -- see the Apply call at the bottom of this file.
 
 function ItemFrame:NumColumns()
 	return self:GetSettings():GetItemFrameColumns()
@@ -605,3 +655,6 @@ end
 function ItemFrame:IsBagBreakEnabled()
 	return self:GetSettings():IsBagBreakEnabled()
 end
+
+
+Bagnon.ExtBankWidget:Apply(ItemFrame)

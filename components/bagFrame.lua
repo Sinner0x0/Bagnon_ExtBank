@@ -121,13 +121,9 @@ end
 -- own Frame only relays out in response to BAG_FRAME_UPDATE_SHOWN (sent
 -- below), not the raw BAG_FRAME_SHOW/HIDE the toggle button fires.
 
-function BagFrame:BAG_FRAME_SHOW(msg, frameID)
-	if frameID == self:GetFrameID() then
-		self:UpdateShown()
-	end
-end
-
-function BagFrame:BAG_FRAME_HIDE(msg, frameID)
+-- One handler for both: UpdateShown reads IsBagFrameShown() for itself, so
+-- which of the two messages arrived tells it nothing it doesn't already ask.
+function BagFrame:OnBagFrameToggled(msg, frameID)
 	if frameID == self:GetFrameID() then
 		self:UpdateShown()
 	end
@@ -135,21 +131,28 @@ end
 
 function BagFrame:UpdateEvents()
 	self:UnregisterAllMessages()
-	self:RegisterMessage('BAG_FRAME_SHOW')
-	self:RegisterMessage('BAG_FRAME_HIDE')
+	self:RegisterMessage('BAG_FRAME_SHOW', 'OnBagFrameToggled')
+	self:RegisterMessage('BAG_FRAME_HIDE', 'OnBagFrameToggled')
 end
 
 
 --[[ Frame Events ]]--
 
+-- Lay ourselves out, then tell the outer Frame our footprint may have moved so
+-- it re-places the item grid below us (up into the gap, or back down) -- same
+-- nudge core's own BagFrame sends on every show/hide. The two go together
+-- everywhere they appear, which is why they're named once here rather than
+-- repeated at each of the three call sites.
+function BagFrame:Relayout()
+	self:Layout()
+	self:SendMessage('BAG_FRAME_UPDATE_SHOWN', self:GetFrameID())
+end
+
 function BagFrame:OnShow()
 	self:RegisterMessage('EXTBANK_MODEL_UPDATED', 'OnModelUpdated')
 	self:RegisterMessage('ITEM_FRAME_SIZE_CHANGE', 'OnItemFrameSizeChange')
 	self:UpdatePurchaseButton()
-	self:Layout()
-	-- tells the outer Frame to relayout (move the item grid up to fill the
-	-- gap, or back down), same as core's BagFrame does on every show/hide
-	self:SendMessage('BAG_FRAME_UPDATE_SHOWN', self:GetFrameID())
+	self:Relayout()
 end
 
 function BagFrame:OnHide()
@@ -169,8 +172,7 @@ function BagFrame:OnModelUpdated()
 	-- nudge OnShow/OnHide/OnItemFrameSizeChange already send so the outer
 	-- Frame catches up to our new size.
 	self:UpdatePurchaseButton()
-	self:Layout()
-	self:SendMessage('BAG_FRAME_UPDATE_SHOWN', self:GetFrameID())
+	self:Relayout()
 end
 
 -- The item grid below us (see itemFrame.lua) only actually settles on its
@@ -181,8 +183,7 @@ end
 -- happens, and on every later column-count/content change after.
 function BagFrame:OnItemFrameSizeChange(msg, frameID)
 	if frameID == self:GetFrameID() then
-		self:Layout()
-		self:SendMessage('BAG_FRAME_UPDATE_SHOWN', self:GetFrameID())
+		self:Relayout()
 	end
 end
 
@@ -191,9 +192,7 @@ end
 
 function BagFrame:UpdateShown()
 	if self:IsBagFrameShown() then
-		if not self:IsShown() then
-			self:Show()
-		end
+		self:Show()
 	else
 		self:Hide()
 	end
@@ -271,7 +270,6 @@ function BagFrame:Layout()
 		local row = math.floor((i - 1) / columns)
 		bag:ClearAllPoints()
 		bag:SetPoint('TOPLEFT', self, 'TOPLEFT', col * (size + SPACING), -(topOffset + row * (size + SPACING)))
-		bag:Show()
 	end
 
 	local rows = math.ceil(#self.bags / columns)
@@ -285,14 +283,6 @@ end
 
 --[[ Properties ]]--
 
-function BagFrame:SetFrameID(frameID)
-	self.frameID = frameID
-end
-
-function BagFrame:GetFrameID()
-	return self.frameID
-end
-
-function BagFrame:GetSettings()
-	return Bagnon.FrameSettings:Get(self:GetFrameID())
-end
+-- SetFrameID/GetFrameID/GetSettings come from Bagnon.ExtBankWidget
+-- (components/widget.lua).
+Bagnon.ExtBankWidget:Apply(BagFrame)

@@ -220,3 +220,129 @@ startup-time `LoadAddOn('Bagnon_Config')` call site appears, or the options inte
 ever observed missing after a `/reload`.
 
 *Verified in game 2026-08-16; re-raised and re-confirmed the same day.*
+
+---
+
+## 5. Item cells draw no quality border, and uncached items show `?`
+
+`components/item.lua`'s `ItemSlot:Update` sets a texture and a count and nothing else. Core
+Bagnon's own `ItemSlot` calls `SetBorderQuality` (`Bagnon/components/item.lua:264`), which
+colours a border texture from `GetItemQualityColor`. So an epic and a grey look identical in
+the vault while the player's bags, bank and guild bank — same Bagnon chrome, same window —
+draw the rarity outline. It is the single most obvious visual gap in the addon and it gets
+flagged by every reviewer who reads `item.lua` on its own.
+
+**This was implemented once and reverted.** Two independent blockers, both outside this
+addon, and neither visible from the file being reviewed.
+
+**The server does not send quality.** The cell record is, in full (`core/model.lua`):
+
+```
+u8 bag, u8 slot, u32 itemId, u32 count, u32 lowGuid, u32 enchant, i32 randomProp, u8 durability
+```
+
+There is no quality field. `ParsePacket` is a field-for-field mirror of `extBank.lua`'s own
+reader, so this is not a field we forgot to parse — it is not on the wire. The same is true
+of the item's name, icon and everything else that would come from item data.
+
+**The client cannot be made to fill the gap.** The only remaining source is
+`GetItemInfo(itemId)`/`GetItemIcon(itemId)`, which read the local item cache, and this
+server does not answer bulk item queries. The observed result of the earlier attempt was
+borders on *some* items and not others — which is worse than none, because a cell with no
+border becomes ambiguous between "this is a grey item" and "the client has not cached this
+item". The same cache is why uncached items render `INV_Misc_QuestionMark` with an empty
+tooltip on a fresh login.
+
+And there is nothing to retry against: 3.3.5a has no `GET_ITEM_INFO_RECEIVED`. A polling
+retry would be re-issuing exactly the queries the server is already declining, on a timer,
+for every cell in the vault.
+
+Note the two symptoms are one cause. A fix for the `?` icons is a fix for the border and
+vice versa; neither can be done without the other, and neither can be done from Lua.
+
+**Reopen if:** `SMSG_EXTBANK_UPDATE` starts carrying a quality byte — it would show up in
+`extBank.lua`'s own reader first, and `core/model.lua` should be re-mirrored against it — or
+the server starts answering item queries for uncached items reliably enough that *every*
+cell resolves. Partial resolution is the failure mode, not a partial success.
+
+---
+
+## 6. `reverseSlotOrder` looks unread by both layout paths
+
+`components/savedFrameSettings.lua` ships `reverseSlotOrder = false` as a real persisted
+default, `ItemFrame` subscribes to `SLOT_ORDER_UPDATE`, and Bagnon_Config leaves the
+"Reverse Slot Order" checkbox **live** for this frame (only `guildbank` is greyed —
+`Bagnon_Config/panels/frameOptions.lua:266`). Meanwhile a repo-wide grep finds no reader:
+both `Layout_Default` and `Layout_BagBreak` iterate `for slot = 0, GetBagSize(bagIndex) - 1`
+ascending and unconditionally. It reads as a setting wired to nothing.
+
+It is not. The reversal happens one level up, inside core: `FrameSettings:GetVisibleBagSlots`
+(`Bagnon/components/frameSettings.lua:447`) returns a *reversed iterator* when the setting is
+on, and `ItemFrame:GetAllVisibleBags` consumes exactly that iterator. So toggling the box
+reverses bag order in the grid.
+
+Core's own item frame does no more than this — `Bagnon/components/itemFrame.lua:364` is the
+same unconditional ascending `for slot = 1, self:GetBagSize(bag)`. Reversing slots *within* a
+bag is not a thing Bagnon does anywhere, for any frame. This addon therefore honours the
+setting to precisely the degree core honours it, which is the correct target: a Void Storage
+window that reversed slot-within-bag while the bag window next to it did not would be the
+actual bug.
+
+**Reopen if:** core Bagnon starts reversing slots within a bag, at which point this frame
+should match it.
+
+---
+
+## 7. Three claims about vendored code that are simply false
+
+Grouped because they share a cause: each is a guess about `../Bagnon` made without reading
+it. The source is on disk, one directory up. Read it before flagging any of these again.
+
+**`ScheduleTimer` only forwards one argument.** The claim is that the WotLK-era
+AceTimer-3.0 signature is `ScheduleTimer(callback, delay, arg)`, so `core/deposit.lua`'s
+stuck-item check receives a nil `link` and the whole feature is dead code. The vendored
+library is `Bagnon/libs/AceTimer-3.0/AceTimer-3.0.lua`, `MINOR = 1017` — the vararg rewrite:
+`function AceTimer:ScheduleTimer(func, delay, ...)` (`:113`), `argsCount = select("#", ...)`
+(`:86`), `unpack(timer, 1, timer.argsCount)` (`:307`). All arguments arrive. Three reviewers
+raised this independently and all three were wrong.
+
+**`GetDefaultExtBankSettings` hands out a shared mutable table.** The claim is that
+memoizing `extBankDefaults` aliases one table across profiles, so "restore defaults" restores
+current values. Core never keeps the reference: `SavedFrameSettings:GetDB()` runs
+`copyDefaults(self.frameDB, self:GetDefaultSettings())` (`Bagnon/components/savedFrameSettings.lua:118`),
+and `copyDefaults` recurses into subtables (`tbl[k] = copyDefaults(tbl[k] or {}, v)`, `:29`).
+Every nested table is freshly allocated per frame.
+
+**`SavedFrameSettings:GetFrameID()` does not exist.** The claim is that the settings classes
+use `GetID()`, so the `frameID or self:GetFrameID()` fallback would throw. It is defined at
+`Bagnon/components/savedFrameSettings.lua:123`, and core's own `GetDefaultSettings` carries
+the identical fallback line. The wrap is a faithful mirror. (`FrameSettings` — a *different*
+class — does use `GetID()`, which is what makes this look inconsistent.)
+
+**Reopen if:** the vendored Bagnon is replaced with a build where any of the above is
+actually true. Check the file, not the vintage.
+
+---
+
+## 8. The two `SetDisabled` calls in `frameOptions.lua`
+
+Both get flagged, in mirror image: that `SetDisabled(isExtBank)` on the sort checkbox
+re-enables it for frames core meant to disable, and that the one-directional
+`SetDisabled(true)` on the bag-frame checkbox leaves it greyed for every frame once the
+player has visited extbank. They cannot both be right, and in fact neither is —
+`Bagnon_Config/panels/frameOptions.lua` settles it:
+
+- The **bag-frame** checkbox is written unconditionally, both directions, on every pass:
+  `self:GetToggleBagFrameCheckbox():SetDisabled(self:GetFrameID() == 'keys' or self:GetFrameID() == 'guildbank')`
+  (`:257`). Core repairs it for us the moment the dropdown moves off extbank, so
+  one-directional is enough.
+- The **sort** checkbox is never passed to `SetDisabled` at all. The only three call sites in
+  Bagnon_Config are `:257`, `:266` and `:269`, and none is the sort box. Nothing else
+  competes for it, so driving both directions there is safe.
+
+**Reopen if:** either of those lines changes shape in the vendored Bagnon_Config —
+specifically if the bag-frame write becomes guarded, or the sort box gains a `SetDisabled`
+call of core's own.
+
+*Entries 5-8 verified against the vendored sources on 2026-08-17; entry 5's in-game
+behaviour reported from an earlier build that implemented and then reverted the border.*

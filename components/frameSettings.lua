@@ -28,10 +28,27 @@ local Bagnon = LibStub('AceAddon-3.0'):GetAddon('Bagnon')
 -- GetDB()-plus-message-bus shape every other per-frame setting already uses
 -- (see SetBagBreak/IsBagBreakEnabled in core for the pattern mirrored here).
 
+-- The setter is gated to this frame, the getter deliberately is NOT.
+--
+-- These two are additions to a class every Bagnon frame shares, not wraps of
+-- existing core methods, so there is no super_ to fall through to -- a guarded
+-- getter could only return nil, and nil is the whole hazard (GetPageCount does
+-- math.ceil(total / n) with it). Leaving the getter open means every frame gets
+-- the same safe default out of savedFrameSettings.lua, which costs nothing and
+-- cannot throw. The setter is worth gating: nothing but this frame has any use
+-- for the value, and an unguarded one would write a dead `bagsPerPage` key into
+-- an unrelated frame's saved settings.
+--
+-- No payload on the message: core's FrameSettings:SendMessage prepends
+-- self:GetID(), so the count previously passed here landed in a third argument
+-- that ITEM_FRAME_BAGS_PER_PAGE_UPDATE's handler (components/itemFrame.lua)
+-- never reads -- it takes (msg, frameID) like every other handler in the addon.
 function Bagnon.FrameSettings:SetBagsPerPage(count)
+	if self:GetID() ~= Bagnon.ExtBank.FRAME_ID then return end
+
 	if self:GetBagsPerPage() ~= count then
 		self:GetDB():SetBagsPerPage(count)
-		self:SendMessage('ITEM_FRAME_BAGS_PER_PAGE_UPDATE', self:GetBagsPerPage())
+		self:SendMessage('ITEM_FRAME_BAGS_PER_PAGE_UPDATE')
 	end
 end
 
@@ -78,7 +95,7 @@ end
 
 local super_IsBagFrameShown = Bagnon.FrameSettings.IsBagFrameShown
 function Bagnon.FrameSettings:IsBagFrameShown()
-	if self:GetID() == 'extbank' then
+	if self:GetID() == Bagnon.ExtBank.FRAME_ID then
 		return self:GetDB():GetBagFrameShown()
 	end
 	return super_IsBagFrameShown(self)
@@ -86,7 +103,7 @@ end
 
 local super_ShowBagFrame = Bagnon.FrameSettings.ShowBagFrame
 function Bagnon.FrameSettings:ShowBagFrame()
-	if self:GetID() == 'extbank' then
+	if self:GetID() == Bagnon.ExtBank.FRAME_ID then
 		if not self:IsBagFrameShown() then
 			self:GetDB():SetBagFrameShown(true)
 			self:SendMessage('BAG_FRAME_SHOW')
@@ -98,7 +115,7 @@ end
 
 local super_HideBagFrame = Bagnon.FrameSettings.HideBagFrame
 function Bagnon.FrameSettings:HideBagFrame()
-	if self:GetID() == 'extbank' then
+	if self:GetID() == Bagnon.ExtBank.FRAME_ID then
 		if self:IsBagFrameShown() then
 			self:GetDB():SetBagFrameShown(false)
 			self:SendMessage('BAG_FRAME_HIDE')

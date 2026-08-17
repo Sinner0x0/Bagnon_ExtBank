@@ -29,10 +29,17 @@ ExtBank.cells = {}
 -- from "this is the very first open and nothing's arrived yet".
 ExtBank.hasModel = false
 
+-- Fresh tables rather than wiping the existing ones in place. Nothing outside
+-- this file ever holds a reference to either -- every reader reaches them
+-- through ExtBank.cells/ExtBank.bags at call time (components/item.lua's
+-- GetCellData, components/itemFrame.lua's GetBagSize, components/bag.lua's
+-- GetBagData, core/deposit.lua) -- so swapping costs nothing, and it leaves the
+-- OLD cell table intact for ParsePacket below to diff the incoming snapshot
+-- against.
 local function ClearModel(self)
 	self.unlockedBags = 0
-	for k in pairs(self.bags)  do self.bags[k]  = nil end
-	for k in pairs(self.cells) do self.cells[k] = nil end
+	self.bags = {}
+	self.cells = {}
 end
 
 
@@ -65,6 +72,31 @@ function ExtBank:ParsePacket(hex)
 	kind,  p = u8(b, p)
 	ub,    p = u8(b, p)
 	nBags, p = u8(b, p)
+
+	-- Which cells this packet puts items INTO, in the order the server listed
+	-- them. core/deposit.lua uses it to find where a just-clicked right-click
+	-- deposit actually landed.
+	--
+	-- Built here rather than by diffing a snapshot taken at click time, because
+	-- the packet already names exactly the cells that changed: the old approach
+	-- deep-copied the whole vault (up to 70 tables and 2520 entries) on every
+	-- right-click in the player's bags -- including potions and lockboxes that
+	-- were never deposits at all -- and then had to rediscover the landing site
+	-- by walking pairs(), which has no defined order and so picked arbitrarily
+	-- when a packet filled more than one cell.
+	--
+	-- Captured before ClearModel below swaps in fresh tables. For a kind ~= 0
+	-- delta previousCells is the same table we are about to write into, which is
+	-- still correct -- each cell is compared against its own previous value
+	-- before that value is overwritten. For a kind == 0 snapshot it keeps
+	-- pointing at the pre-snapshot state, which is what the diff wants.
+	--
+	-- Only built when a deposit is actually in flight; otherwise the answer is
+	-- thrown away, so nothing is allocated.
+	local watchingDeposits = self:HasPendingDeposits() > 0
+	local previousCells = self.cells
+	local gained, nGained = nil, 0
+	if watchingDeposits then gained = {} end
 
 	-- Both the bag records and `ub` being consumed only here -- and not for
 	-- kind ~= 0 -- mirrors extBank.lua:63-79. See docs/non-issues.md §2.
@@ -111,6 +143,19 @@ function ExtBank:ParsePacket(hex)
 		if itemId == 0 then
 			self.cells[bi][slot] = nil
 		else
+			if watchingDeposits then
+				-- Newly occupied, occupied by a DIFFERENT item than before, or
+				-- an existing stack that grew. A right-click deposit can land
+				-- as any of the three, and that last one -- merging into a
+				-- partial stack already in the vault -- changes only the count,
+				-- so an occupied/not-occupied diff never saw it at all.
+				local before = previousCells[bi] and previousCells[bi][slot]
+				if not before or before.itemId ~= itemId or count > (before.count or 0) then
+					nGained = nGained + 1
+					gained[nGained] = { bagIndex = bi, slot = slot }
+				end
+			end
+
 			self.cells[bi][slot] = { itemId = itemId, count = count, lowGuid = guid,
 				enchant = ench, randomProp = rnd, durability = dur }
 		end
@@ -122,7 +167,7 @@ function ExtBank:ParsePacket(hex)
 	-- turns a snapshot taken right before a real-inventory deposit click into
 	-- an actual page-aware relocation, now that the cells above reflect
 	-- whatever the server just did in response.
-	self:CorrectPendingDeposit()
+	self:CorrectPendingDeposit(gained)
 
 	-- NOT self:SendMessage -- that's AceEvent-3.0's own message bus (mixed
 	-- into this module via NewModule(..., 'AceEvent-3.0')), a completely

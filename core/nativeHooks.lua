@@ -67,11 +67,35 @@ function ExtBank:HookNativeGlobals()
 		-- native side about it" -- without this flag, a native-triggered
 		-- close would loop back into calling ExtBank_Close() a second,
 		-- redundant (if harmless) time.
+		-- The flag has to stay true across BOTH calls below -- OnNativeClose
+		-- hides our frame, which runs components/frame.lua's OnHide, and that
+		-- is the reader it exists for. Clearing it any earlier would have OnHide
+		-- call _G.ExtBank_Close() straight back into this same wrapper.
+		--
+		-- So the calls are pcall'd instead. previousClose is ProjectEbonhold's
+		-- code, not ours, and OnNativeClose reaches the whole teardown funnel;
+		-- a plain set/clear pair around them strands the flag true for the rest
+		-- of the session the first time anything in there throws. From that
+		-- point OnHide takes the `not closingFromNative` branch as false forever
+		-- and stops telling extBank.lua's isOpen upvalue anything on an X-button
+		-- or Escape close -- silently reinstating the exact "click Void Storage
+		-- twice to reopen it" bug this flag exists to prevent, with no visible
+		-- cause and no way back short of /reload.
+		--
+		-- Errors are handed to geterrorhandler() rather than swallowed: the
+		-- point is to guarantee the flag is cleared, not to hide breakage. That
+		-- is also how the client itself reports an error out of a script
+		-- handler, so this reads no differently to the player or to BugSack.
 		ExtBank.closingFromNative = true
+
 		if type(previousClose) == 'function' then
-			previousClose(...)
+			local ok, err = pcall(previousClose, ...)
+			if not ok then geterrorhandler()(err) end
 		end
-		ExtBank:OnNativeClose()
+
+		local ok, err = pcall(ExtBank.OnNativeClose, ExtBank)
+		if not ok then geterrorhandler()(err) end
+
 		ExtBank.closingFromNative = false
 	end
 

@@ -166,6 +166,20 @@ function Frame:OnHide()
 	ExtBank:ClearPendingDeposit()
 	StaticPopup_Hide(Bagnon.ExtBankBagFrame.UNLOCK_POPUP)
 
+	-- The drag exemption belongs to the same "in-flight click state" family as
+	-- the two clears above, and for the same reason -- closing the window is the
+	-- end of the gesture. It needs saying explicitly because ItemSlot:OnDragStop
+	-- is its only other clearer, and closing mid-drag is exactly the case that
+	-- never reaches it: hiding a slot cancels WoW's native drag outright,
+	-- before OnDragStop fires (itemFrame.lua documents this for the paging
+	-- case). Left set, the next open still treats that button as a live drag
+	-- origin -- permanently exempt from Free(), re-parked off-screen every
+	-- pass -- until some later real drag happens to overwrite it.
+	local itemFrame = self:GetItemFrame()
+	if itemFrame then
+		itemFrame:SetDraggingSlot(nil)
+	end
+
 	if not ExtBank.closingFromNative and type(_G.ExtBank_Close) == 'function' then
 		_G.ExtBank_Close()
 	end
@@ -199,7 +213,7 @@ end
 -- Bank]]) -- SetFormattedText fills in the %s with the current player name.
 local super_GetTitleText = Bagnon.TitleFrame.GetTitleText
 function Bagnon.TitleFrame:GetTitleText()
-	if self:GetFrameID() == 'extbank' then
+	if self:GetFrameID() == ExtBank.FRAME_ID then
 		return [[%s's Void Storage]]
 	end
 	return super_GetTitleText(self)

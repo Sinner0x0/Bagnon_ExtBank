@@ -49,6 +49,19 @@ function PageBar:New(frameID, parent)
 	-- Nothing is lost by staying quiet: whoever is building us is
 	-- PlaceItemFrame itself, mid-layout, and it reads our IsShown() the
 	-- moment CreatePageBar returns -- in that same pass.
+	--
+	-- Which is also why UpdateShown()'s own Show() is fine here, and why the
+	-- rule is specifically "send no message", not "never Show()": PlaceItemFrame
+	-- reads IsShown() to decide how much height to hand back, so a bar that
+	-- stayed hidden through its own construction would have its footprint left
+	-- out of the very layout pass that built it.
+	--
+	-- That safety rests on one thing: this class sets NO OnShow script. Show()
+	-- therefore fires nothing on the Ears bus and cannot re-enter anything.
+	-- Giving PageBar an OnShow -- the natural place to put Update() -- arms the
+	-- loop this comment exists to prevent, because Update() DOES send
+	-- BAG_FRAME_UPDATE_SHOWN. Contrast bagFrame.lua:64, which does set one, and
+	-- correspondingly must not Show() from its constructor at all.
 	f:UpdateShown()
 
 	return f
@@ -210,10 +223,7 @@ end
 
 --[[ Properties ]]--
 
-function PageBar:SetFrameID(frameID)
-	self.frameID = frameID
-end
-
-function PageBar:GetFrameID()
-	return self.frameID
-end
+-- SetFrameID/GetFrameID come from Bagnon.ExtBankWidget
+-- (components/widget.lua). GetSettings comes with them and is unused here --
+-- harmless, and cheaper than carving the mixin up per class.
+Bagnon.ExtBankWidget:Apply(PageBar)

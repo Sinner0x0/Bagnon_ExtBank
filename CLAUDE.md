@@ -136,11 +136,18 @@ function before altering it.
   Blizzard's `GameTooltip_OnUpdate` polls `owner.UpdateTooltip` ~5×/sec and
   re-invokes it, tearing the tooltip down mid-hover. The convention here is
   `RefreshTooltip`.
-- **Constructors must not `Show()` themselves or send `BAG_FRAME_UPDATE_SHOWN`.**
+- **A constructor must not let `BAG_FRAME_UPDATE_SHOWN` escape.**
   `Frame:CreateBagFrame`/`CreatePageBar` assign `self.bagFrame`/`self.pageBar` only
   *after* `New` returns, so a synchronous relayout re-enters the constructor
-  unboundedly — an instant client freeze. `BagFrame:New` and `PageBar:New` both
-  document this.
+  unboundedly — an instant client freeze. The message is the hazard, not `Show()`
+  itself, and the two classes differ on that point:
+  - `BagFrame:New` sets an `OnShow` script that sends the message, so it must not
+    `Show()` from the constructor — core's `PlaceBagFrame` shows it a moment later.
+  - `PageBar:New` sets **no** `OnShow`, so its `UpdateShown()` may and does
+    `Show()`: `PlaceItemFrame` reads `IsShown()` in the same pass to size the
+    window. Adding an `OnShow` to `PageBar` is what would arm the freeze.
+
+  Both constructors document their own half. Don't "fix" one to match the other.
 - **Item slots use a plain `.slot` field, never `SetID()`** — the container template's
   default logic reads `GetID()` plus the parent's as a real `(bag, slot)` pair.
 - Lua 5.1 only: no `goto`, integer division, bitwise operators, or retail `C_*`

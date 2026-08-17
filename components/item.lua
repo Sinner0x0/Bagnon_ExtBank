@@ -20,11 +20,12 @@ function ItemSlot:New(bagIndex, slot, frameID, parent)
 	item:SetFrameID(frameID)
 	item:SetSlot(bagIndex, slot)
 
-	if item:IsVisible() then
-		item:Update()
-	else
-		item:Show()
-	end
+	-- Always a real hidden -> shown transition, so OnShow always fires and
+	-- always runs Update(): Create() hides on the way out, and Free() hides
+	-- before pooling, so neither branch into here can hand back a visible
+	-- button. The `if item:IsVisible() then item:Update() end` arm this replaces
+	-- was unreachable for that reason.
+	item:Show()
 
 	return item
 end
@@ -90,8 +91,17 @@ end
 
 --[[ Destructor ]]--
 
+-- ClearAllPoints matters here in a way it doesn't for core Bagnon's otherwise
+-- identical Free(): core's Layout() is synchronous, ours is deferred by a frame
+-- (see itemFrame.lua's throttled updater). Pooling a button with its old
+-- SetPoint intact meant a Restore()d cell was Shown and bound to its NEW
+-- (bagIndex, slot) while still anchored at the PREVIOUS one's grid coordinates
+-- until the next OnUpdate -- drawn on top of a live cell, already
+-- mouse-enabled, so a click landing in that window acted on a cell the player
+-- was not looking at.
 function ItemSlot:Free()
 	self:Hide()
+	self:ClearAllPoints()
 	self:SetParent(nil)
 
 	ItemSlot.unused = ItemSlot.unused or {}
@@ -285,9 +295,11 @@ function ItemSlot:OnEnter()
 	self:RefreshTooltip()
 end
 
-function ItemSlot:OnLeave()
-	GameTooltip:Hide()
-end
+-- OnLeave, AnchorTooltip and RefreshTooltipIfOwned all come from
+-- Bagnon.ExtBankWidget (components/widget.lua), shared with bag.lua. Note
+-- OnLeave there is guarded on GameTooltip:IsOwned(self); the unconditional
+-- Hide() this used to do could blank a tooltip another frame had already
+-- taken ownership of.
 
 
 --[[ Update Methods ]]--
@@ -305,10 +317,7 @@ function ItemSlot:Update()
 	end
 
 	self:UpdateSearch()
-
-	if GameTooltip:IsOwned(self) then
-		self:RefreshTooltip()
-	end
+	self:RefreshTooltipIfOwned()
 end
 
 -- Same empty-slot background core Bagnon/Bagnon_GuildBank use, and honors
@@ -323,28 +332,41 @@ end
 
 -- Dims (rather than hides) cells that don't match the addon-wide text
 -- search, same as core Bagnon/Bagnon_GuildBank's own item slots.
-function ItemSlot:UpdateSearch()
-	local search = Bagnon.Settings:GetTextSearch()
+-- `search` is passed in by ItemFrame:TEXT_SEARCH_UPDATE, which reads it once for
+-- the whole grid; omitted (the Update() path) it's looked up here.
+function ItemSlot:UpdateSearch(search)
+	if search == nil then
+		search = Bagnon.Settings:GetTextSearch()
+	end
+
 	local shouldFade = false
-
-	if search and search ~= '' then
-		local data = self:GetCellData()
-		shouldFade = not (data and ItemSearch:Find(('item:%d'):format(data.itemId), search))
+	if search ~= nil and search ~= '' then
+		local link = self:GetSearchLink()
+		shouldFade = not (link and ItemSearch:Find(link, search))
 	end
 
-	if shouldFade then
-		self:SetAlpha(0.4)
-	else
-		self:SetAlpha(1)
-	end
+	self:SetAlpha(shouldFade and 0.4 or 1)
 end
 
-function ItemSlot:AnchorTooltip()
-	if self:GetRight() > (GetScreenWidth() / 2) then
-		GameTooltip:SetOwner(self, 'ANCHOR_LEFT')
-	else
-		GameTooltip:SetOwner(self, 'ANCHOR_RIGHT')
+-- Rebuilt only when this cell's item actually changes. It used to be formatted
+-- fresh inside UpdateSearch, which runs once per cell per keystroke, so a full
+-- page threw away 180 strings per character typed.
+--
+-- Keyed on itemId rather than cleared in SetSlot because the pool rebinds
+-- buttons freely: comparing against the CURRENT cell's itemId is correct
+-- whichever cell this button was serving a moment ago, and when the id happens
+-- to match, the cached link was already the right one.
+function ItemSlot:GetSearchLink()
+	local data = self:GetCellData()
+	if not data then
+		return nil
 	end
+
+	if self.searchLinkId ~= data.itemId then
+		self.searchLinkId = data.itemId
+		self.searchLink = ('item:%d'):format(data.itemId)
+	end
+	return self.searchLink
 end
 
 -- Deliberately NOT named UpdateTooltip. Classy gives every instance a live
@@ -416,10 +438,6 @@ function ItemSlot:GetCellData()
 	return page and page[self.slot]
 end
 
-function ItemSlot:SetFrameID(frameID)
-	self.frameID = frameID
-end
 
-function ItemSlot:GetFrameID()
-	return self.frameID
-end
+-- SetFrameID/GetFrameID/GetSettings, plus the tooltip trio above.
+Bagnon.ExtBankWidget:Apply(ItemSlot)

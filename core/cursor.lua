@@ -55,9 +55,21 @@ function ExtBank:HookCursorTracking()
 
 	hooksecurefunc('PickupContainerItem', function(bag, slot)
 		if CursorHasItem() then
-			ExtBank.cursorSrc = { bag = bag, slot = slot }
+			ExtBank.cursorSrc = { bag = bag, slot = slot }  -- no count: the whole stack
 		else
 			ExtBank.cursorSrc = nil  -- this call put the item back down
+		end
+	end)
+
+	-- The shift-drag split, which the comment below already named as a way the
+	-- cursor gets loaded behind this file's back. Recording `count` is what
+	-- lets GetVerifiedCursorSource tell a partial stack from a whole one --
+	-- see the refusal there for why that distinction has to be made.
+	hooksecurefunc('SplitContainerItem', function(bag, slot, count)
+		if CursorHasItem() then
+			ExtBank.cursorSrc = { bag = bag, slot = slot, count = count }
+		else
+			ExtBank.cursorSrc = nil
 		end
 	end)
 
@@ -119,6 +131,28 @@ function ExtBank:GetVerifiedCursorSource()
 	local cursorType, _, cursorLink = GetCursorInfo()
 	if cursorType ~= 'item' or not cursorLink or cursorLink ~= GetContainerItemLink(src.bag, src.slot) then
 		UIErrorsFrame:AddMessage("Void Storage: can't tell where that item came from -- pick it up from your bags to deposit it", 1, 0.3, 0.3)
+		return nil
+	end
+
+	-- Refused rather than deposited, because a partial stack is the one case
+	-- the link check above cannot catch and this addon cannot yet honour.
+	--
+	-- The check passes for a split: a shift-drag leaves the REMAINDER sitting in
+	-- the source slot reporting a byte-identical link, so "what's on the cursor
+	-- still matches what that slot says" is true even though the player is
+	-- carrying 5 of a 20-stack. Every caller then reaches ExtBank:Move without a
+	-- count, which sends ExtBankMove(..., 0) -- and 0 means the whole stack. So
+	-- asking to deposit 5 silently moved all 20.
+	--
+	-- Depositing the right amount means sending a real count, and the server's
+	-- count semantics have never been probed (the accepted source-bag range in
+	-- IsAcceptedSource above was probed, deliberately, rather than assumed --
+	-- same standard applies here). Guessing wrong moves the wrong quantity just
+	-- as silently, in the other direction. Until someone confirms it against the
+	-- live server, saying no is the honest answer: nothing moves, the item stays
+	-- on the cursor, and the player is told what to do instead.
+	if src.count then
+		UIErrorsFrame:AddMessage('Void Storage: partial stacks can only be deposited whole -- put it back and deposit the full stack', 1, 0.3, 0.3)
 		return nil
 	end
 

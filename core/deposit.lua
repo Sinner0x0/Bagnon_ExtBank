@@ -49,43 +49,63 @@ local ExtBank = Bagnon.ExtBank
 -- not a Blizzard-protected function) to relocate the item onto the current
 -- page, if there's room.
 
-ExtBank.pendingDeposit = nil -- { snapshot, at } of an in-flight real-inventory deposit, or nil
+ExtBank.pendingDeposits = nil -- list of GetTime() stamps, one per in-flight real-inventory deposit, or nil
 
--- How long an armed snapshot stays worth acting on. The correction answers
--- one specific click, so it's only meaningful while the server's response to
--- THAT click is still outstanding -- a round trip, not minutes. Past this the
--- snapshot describes a vault state that has since moved on, and diffing
--- against it would credit whatever changed next to a click that's long over.
+-- How long an armed click stays worth acting on. The correction answers one
+-- specific click, so it's only meaningful while the server's response to THAT
+-- click is still outstanding -- a round trip, not minutes. Past that the click
+-- is long over, and crediting whatever changed next to it would relocate an
+-- item the player never deposited.
 local DEPOSIT_RESPONSE_WINDOW = 3 -- seconds
 
 function ExtBank:ClearPendingDeposit()
-	self.pendingDeposit = nil
+	self.pendingDeposits = nil
 end
 
--- bagIndex -> {slot=true, ...} for every occupied vault cell right now.
-local function SnapshotOccupiedCells()
-	local snap = {}
-	for bagIndex, cellsForBag in pairs(ExtBank.cells) do
-		local occupied = {}
-		for slot in pairs(cellsForBag) do
-			occupied[slot] = true
-		end
-		snap[bagIndex] = occupied
+-- A LIST, not a single slot. A player emptying several items into the vault
+-- clicks well within one server round trip, and a single slot meant every click
+-- but one was silently dropped: the second click overwrote the first's arm
+-- before any response landed, so only one of them ever got the page-aware
+-- correction the README promises.
+function ExtBank:ArmPendingDeposit()
+	local pending = self.pendingDeposits
+	if not pending then
+		pending = {}
+		self.pendingDeposits = pending
 	end
-	return snap
+	pending[#pending + 1] = GetTime()
 end
 
--- The first cell that's occupied now but wasn't in an earlier snapshot --
--- i.e. wherever a just-completed deposit actually landed.
-local function FindNewlyFilledCell(before)
-	for bagIndex, cellsForBag in pairs(ExtBank.cells) do
-		local beforeForBag = before[bagIndex]
-		for slot in pairs(cellsForBag) do
-			if not (beforeForBag and beforeForBag[slot]) then
-				return bagIndex, slot
-			end
+-- How many armed clicks are still waiting on an answer, dropping any that have
+-- aged out on the way past.
+--
+-- Expiry matters because not every armed click results in a deposit, and one
+-- that doesn't is never answered. Two ways that happens: UseContainerItem
+-- reaches us but not the native deposit (it hooks
+-- ContainerFrameItemButton_OnClick, we hook the API, so a /run or another
+-- addon's call arms only ours), and right-clicks the server rejects outright
+-- (vault full, no bag equipped, empty source slot, a container that still has
+-- items in it). A rejection looks exactly like silence, so the client can't
+-- tell them apart -- bounding the lifetime covers all of them without having to.
+function ExtBank:HasPendingDeposits()
+	local pending = self.pendingDeposits
+	if not pending then return 0 end
+
+	local now, live = GetTime(), 0
+	for i = 1, #pending do
+		if now - pending[i] <= DEPOSIT_RESPONSE_WINDOW then
+			live = live + 1
+			pending[live] = pending[i]
 		end
 	end
+	for i = #pending, live + 1, -1 do
+		pending[i] = nil
+	end
+
+	if live == 0 then
+		self.pendingDeposits = nil
+	end
+	return live
 end
 
 function ExtBank:IsBagOnCurrentPage(bagIndex)
@@ -98,59 +118,98 @@ function ExtBank:IsBagOnCurrentPage(bagIndex)
 	return false
 end
 
--- The slice of ExtBank.cells that GetVisibleBags (this frame's current
--- page) actually covers, first cell with no item in it. nil if every bag
--- on the current page is completely full (or the window/page isn't known
--- yet, e.g. nothing's ever been shown this session).
-function ExtBank:GetCurrentPageFreeSlot()
+-- The slice of ExtBank.cells that GetVisibleBags (this frame's current page)
+-- actually covers, first cell with no item in it.
+--
+-- `claimed` is anything already promised to an earlier item in this same pass:
+-- the server hasn't answered our own relocations yet, so the model still shows
+-- those slots empty, and two items landing in one packet would otherwise both
+-- be sent to the same one.
+--
+-- Returns nil plus a reason rather than a bare nil, because there are three
+-- different ways to have nowhere to put it and the player was previously told
+-- "current page is full" for all three -- including the case where they have
+-- simply toggled every bag off and the page holds no slots at all.
+function ExtBank:GetCurrentPageFreeSlot(claimed)
 	local itemFrame = self.window and self.window:GetItemFrame()
-	if not itemFrame then return nil end
+	if not itemFrame then return nil, nil, 'nowindow' end
 
+	local anyBags = false
 	for _, bagIndex in itemFrame:GetVisibleBags() do
+		anyBags = true
 		local size = (self.bags[bagIndex] and self.bags[bagIndex].size) or 0
 		local cells = self.cells[bagIndex]
+		local taken = claimed and claimed[bagIndex]
 
 		for slot = 0, size - 1 do
-			if not (cells and cells[slot]) then
+			if not (cells and cells[slot]) and not (taken and taken[slot]) then
 				return bagIndex, slot
 			end
 		end
 	end
+
+	return nil, nil, (anyBags and 'full' or 'nobags')
 end
 
--- Called from ParsePacket (core/model.lua) once the model's caught up with
--- whatever the server just did in response to a deposit
--- HookInventoryDepositWatch below saw coming. A no-op most of the time:
--- nothing pending (no matching click since the last update), the click didn't
--- actually result in a deposit (e.g. the item wasn't vault-eligible), or it
--- already landed on the current page on its own.
-function ExtBank:CorrectPendingDeposit()
-	local pending = self.pendingDeposit
+-- Called from ParsePacket (core/model.lua) with the list of cells that packet
+-- put items into, once the model has caught up with whatever the server did in
+-- response to a deposit HookInventoryDepositWatch below saw coming. A no-op most
+-- of the time: nothing armed, the click didn't actually result in a deposit
+-- (e.g. the item wasn't vault-eligible), or it already landed on the page the
+-- player is looking at.
+--
+-- Bounded by the number of live arms, and that bound is load-bearing rather
+-- than tidiness: a kind == 0 snapshot reports every occupied cell as newly
+-- gained, because ClearModel wipes the model before the cell list is applied.
+-- Without the bound, one armed click answered by a full refresh would march the
+-- entire vault onto the current page.
+function ExtBank:CorrectPendingDeposit(gained)
+	local arms = self:HasPendingDeposits()
 	self:ClearPendingDeposit()
-	if not pending then return end
 
-	-- Not every armed click results in a deposit, and one that doesn't is
-	-- never answered -- so without this the arm sits here indefinitely and
-	-- gets spent on whatever unrelated update happens to arrive next. Two
-	-- ways that happens: UseContainerItem reaches us but not the native
-	-- deposit (it hooks ContainerFrameItemButton_OnClick, we hook the API, so
-	-- a /run or another addon's call arms only ours), and right-clicks the
-	-- server rejects outright (vault full, no bag equipped, empty source
-	-- slot, a container that still has items in it). Bounding the lifetime
-	-- covers all of them without the client having to tell them apart --
-	-- which it can't, since a rejection looks exactly like silence.
-	if GetTime() - pending.at > DEPOSIT_RESPONSE_WINDOW then return end
+	if arms == 0 or not gained then return end
 
-	local landedBag, landedSlot = FindNewlyFilledCell(pending.snapshot)
-	if not landedBag or self:IsBagOnCurrentPage(landedBag) then
-		return -- nothing landed, or it's already where the player's looking
+	-- ParsePacket calls us BEFORE it broadcasts EXTBANK_MODEL_UPDATED, so the
+	-- item frame hasn't reconciled yet and its cached page lists still describe
+	-- the previous packet. That matters whenever this packet also equipped or
+	-- unequipped a bag, since GetAllVisibleBags filters on GetBagSize() > 0 --
+	-- we would otherwise decide "is this bag on the current page?" against a
+	-- page that no longer exists in that shape. Cheap to drop; UpdateEverything
+	-- drops them again a moment later anyway.
+	local itemFrame = self.window and self.window:GetItemFrame()
+	if itemFrame then
+		itemFrame:InvalidateVisibleBags()
 	end
 
-	local dstBag, dstSlot = self:GetCurrentPageFreeSlot()
-	if dstBag then
-		self:MoveWithinVault(landedBag, landedSlot, dstBag, dstSlot)
-	else
-		UIErrorsFrame:AddMessage('Void Storage: current page is full -- item stored on another page', 1, 0.8, 0)
+	local claimed, complained
+	for i = 1, #gained do
+		if arms == 0 then return end
+
+		local landed = gained[i]
+		if not self:IsBagOnCurrentPage(landed.bagIndex) then
+			arms = arms - 1
+
+			local dstBag, dstSlot, why = self:GetCurrentPageFreeSlot(claimed)
+			if not dstBag then
+				-- Once per packet, not once per item -- a bulk deposit into a
+				-- full page would otherwise print the same line a dozen times.
+				if not complained and why ~= 'nowindow' then
+					complained = true
+					if why == 'nobags' then
+						UIErrorsFrame:AddMessage('Void Storage: no bag shown on this page -- item stored on another page', 1, 0.8, 0)
+					else
+						UIErrorsFrame:AddMessage('Void Storage: current page is full -- item stored on another page', 1, 0.8, 0)
+					end
+				end
+				return
+			end
+
+			claimed = claimed or {}
+			claimed[dstBag] = claimed[dstBag] or {}
+			claimed[dstBag][dstSlot] = true
+
+			self:MoveWithinVault(landed.bagIndex, landed.slot, dstBag, dstSlot)
+		end
 	end
 end
 
@@ -295,8 +354,8 @@ function ExtBank:HookInventoryDepositWatch()
 
 	hooksecurefunc('UseContainerItem', function(bag, slot)
 		if not (bag and bag >= 0 and bag <= 4) then return end -- not real live-inventory (bank, keyring, ...)
-		if not Bagnon.FrameSettings:Get('extbank'):IsShown() then return end
-		ExtBank.pendingDeposit = { snapshot = SnapshotOccupiedCells(), at = GetTime() }
+		if not Bagnon.FrameSettings:Get(ExtBank.FRAME_ID):IsShown() then return end
+		ExtBank:ArmPendingDeposit()
 
 		-- Read the link HERE, not in the check itself: by then the slot may be
 		-- empty (deposit worked) or hold something else, and the check needs to

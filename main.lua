@@ -60,8 +60,8 @@ Bagnon.ExtBank = ExtBank
 -- hand-maintained -- .github/scripts/stamp-version.sh writes both from the
 -- .toc's version plus today's date, the pre-commit hook runs it, and CI
 -- re-checks it. See README's "Working on this addon".
-ExtBank.VERSION = '1.0.0'
-ExtBank.DATE    = '16-08-2026'
+ExtBank.VERSION = '1.0.1'
+ExtBank.DATE    = '17-08-2026'
 
 
 --[[ Addressing ]]--
@@ -86,6 +86,20 @@ ExtBank.AUTO_INV     = 254  -- dstBag sentinel: first free live-inventory slot
 -- how many buttons to build.
 ExtBank.MAX_BAGS = 70
 
+-- The Bagnon frameID this whole module is keyed on. Every settings default,
+-- every monkeypatch guard over vendored Bagnon, and every FrameSettings:Get
+-- call in this addon uses it.
+--
+-- A constant rather than eleven copies of the literal because of how a typo
+-- fails here: none of those sites would error. Each one is a
+-- `if frameID == 'extbank'` guard in a wrap around a core method, so a
+-- misspelling silently takes the fall-through branch instead -- core's bag
+-- defaults rather than our 70-slot availableBags, the generic bags title
+-- rather than "%s's Void Storage", core's session-only bag-strip flag rather
+-- than the persisted one. The window still opens; it is just quietly the
+-- wrong window, and nothing points at the cause.
+ExtBank.FRAME_ID = 'extbank'
+
 
 --[[ Lifecycle ]]--
 
@@ -99,7 +113,7 @@ function ExtBank:OnEnable()
 	-- is itself a widget descended from this frame and just calls
 	-- self:GetParent() up the chain (see components/pageBar.lua), which isn't
 	-- an option for this module.
-	self.window = Bagnon.ExtBankFrame:New('extbank')
+	self.window = Bagnon.ExtBankFrame:New(self.FRAME_ID)
 
 	-- Safe to hook immediately, no PLAYER_LOGIN gating -- see the comment
 	-- above it in core/deposit.lua.
@@ -146,11 +160,11 @@ end
 
 function ExtBank:OnNativeClose()
 	self:CancelPendingShow()
-	Bagnon.FrameSettings:Get('extbank'):Hide()
+	Bagnon.FrameSettings:Get(self.FRAME_ID):Hide()
 end
 
 function ExtBank:ShowWindow()
-	Bagnon.FrameSettings:Get('extbank'):Show()
+	Bagnon.FrameSettings:Get(self.FRAME_ID):Show()
 end
 
 local waitingForModel = false

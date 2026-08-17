@@ -1,4 +1,7 @@
 <Ui xmlns="http://www.blizzard.com/wow/ui/">
+	<!-- First: every widget file below calls Bagnon.ExtBankWidget:Apply at its
+	     own file scope, so the mixin has to exist by the time they load. -->
+	<Script file="components\widget.lua"/>
 	<Script file="components\item.lua"/>
 	<Script file="components\itemFrame.lua"/>
 	<Script file="components\bag.lua"/>
