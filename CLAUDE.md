@@ -89,8 +89,11 @@ Bagnon.ExtBank = ExtBank
 All cross-file state hangs off that table (`ExtBank.bags`, `.cells`,
 `.unlockedBags`, `.cursorSrc`, `.pickSrc`, `.window`, the addressing constants).
 A `local` in one file is invisible to the others, so nothing shared is ever a
-file-local. AceTimer is mixed in solely for `core/deposit.lua`'s two delayed checks
-— 3.3.5 has no `C_Timer`.
+file-local. AceTimer is mixed in for `core/deposit.lua`'s two delayed checks **and**
+for `main.lua`'s first-snapshot wait (`ShowWindowOnceModelReady`) — 3.3.5 has no
+`C_Timer`. Both callers matter: dropping the mixin because `deposit.lua` no longer
+needs it throws on the first vault open of every session, from inside a handler
+that has already suppressed the native window.
 
 ### Data flow
 

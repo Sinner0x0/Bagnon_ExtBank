@@ -172,11 +172,24 @@ end
 -- it. Confirmed as the same hazard OnDragStop's own comment describes for the drag
 -- route, which was fixed there and not here.
 --
+-- That precedence is over the virtual pick only, which is why the branch is
+-- guarded on the cursor being empty. A real carried item supersedes both, exactly
+-- as DropCarriedItem states -- nobody is holding two things at once. Without the
+-- guard the withdraw test preempted the deposit funnel as collateral: shift-drag
+-- 5 off a stack in your bags and then, still holding shift, click a vault cell to
+-- place them, and an empty cell did nothing at all (GetCellData() is nil, so not
+-- even a message), while an occupied one fired a withdrawal in the *opposite*
+-- direction -- the cell's item flew out into the bags with the split stack still
+-- on the cursor, where DropCarriedItem would have answered "that slot is taken".
+-- Same for any right-click made while carrying. The forgotten-pick hazard the
+-- ordering exists for needs no cursor to arise, so scoping it this way gives up
+-- nothing it was fixing.
+--
 -- Only LeftButton arms a pick. The button is RegisterForClicks('anyUp'), so the
 -- old catch-all `else` armed one on middle-click and on mouse buttons 4 and 5 too
 -- -- invisible state from a gesture nobody would associate with picking an item up.
 function ItemSlot:OnClick(button)
-	if button == 'RightButton' or IsShiftKeyDown() then
+	if not CursorHasItem() and (button == 'RightButton' or IsShiftKeyDown()) then
 		ExtBank:ClearPick()
 
 		if self:GetCellData() then
@@ -287,9 +300,12 @@ function ItemSlot:OnDragStop()
 	-- frame entirely, so this handler is the last word. Confirmed in-game --
 	-- drag a vault item out onto your bags (which does nothing by itself,
 	-- withdrawal being right-click only) and without this clear the next
-	-- click on any cell moves the dragged item instead of doing what was
-	-- asked, including a right-click meant to withdraw (DropCarriedItem runs
-	-- ahead of the button check in OnClick above).
+	-- LEFT-click on any cell moves the dragged item instead of picking up
+	-- what was clicked. A right-click no longer shares that fate: OnClick
+	-- tests the button ahead of DropCarriedItem and clears the pick on the
+	-- withdraw path, which is what that reordering was for. That is a second
+	-- fix covering one half of this hazard, not a reason to drop this one --
+	-- the left-click half has no other guard.
 	local target = GetMouseFocus()
 	if not (target and target.DropCarriedItem) then
 		ExtBank:ClearPick()

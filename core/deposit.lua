@@ -11,10 +11,12 @@
 		    lock left behind when the server refuses the deposit
 
 		Both halves need a delay -- one waits for the server's answer, the
-		other looks at the aftermath -- which is the only reason this module
-		mixes in AceTimer-3.0 at all (see main.lua's NewModule call). 3.3.5
-		has no C_Timer; AceTimer is embedded and loaded by core Bagnon's own
-		embeds.xml, so it's already present by the time this file runs.
+		other looks at the aftermath -- which is one of the two reasons this
+		module mixes in AceTimer-3.0 (see main.lua's NewModule call; the
+		other is its own first-snapshot wait, so don't trim the mixin on the
+		strength of this file alone). 3.3.5 has no C_Timer; AceTimer is
+		embedded and loaded by core Bagnon's own embeds.xml, so it's already
+		present by the time this file runs.
 --]]
 
 local Bagnon = LibStub('AceAddon-3.0'):GetAddon('Bagnon')
@@ -544,17 +546,24 @@ function ExtBank:HookInventoryDepositWatch()
 	hooksecurefunc('UseContainerItem', function(bag, slot)
 		if not (bag and bag >= 0 and bag <= 4) then return end -- not real live-inventory (bank, keyring, ...)
 
-		-- "Is the vault open?", and our own window being on screen is only half of
-		-- that. On the session's first open main.lua waits for the snapshot before
-		-- showing anything (~100ms, longer if it is late, forever if it never comes),
-		-- but the NATIVE side set its own isOpen the moment ExtBank_Open ran -- so its
-		-- right-click deposit post-hook is already live in that gap, and a deposit
-		-- made there is a real deposit that can be really refused. Gated on IsShown()
-		-- alone, neither the page correction nor -- the part that matters -- the
-		-- stuck-item warning armed for it, leaving the player with an item that cannot
-		-- be used, moved or sold and nothing on screen explaining why.
-		if not (ExtBank:IsWaitingForModel()
-			or Bagnon.FrameSettings:Get(ExtBank.FRAME_ID):IsShown()) then return end
+		-- "Is the vault open?" -- and our own window being on screen is not even half
+		-- of that. The NATIVE side sets its own isOpen the moment ExtBank_Open runs,
+		-- so its right-click deposit post-hook is live from then until a real
+		-- ExtBank_Close, and a deposit made anywhere in there is a real deposit that
+		-- can be really refused. Our window covers only part of that span: on the
+		-- session's first open main.lua waits for the snapshot before showing
+		-- anything, re-asks the server once if it does not come, and then gives up
+		-- without showing a window at all. Gated on IsShown(), neither the page
+		-- correction nor -- the part that matters -- the stuck-item warning would arm
+		-- across any of it, leaving the player with an item that cannot be used,
+		-- moved or sold and nothing on screen explaining why.
+		--
+		-- IsVaultSessionOpen answers that question directly rather than by proxy. It
+		-- replaced `IsWaitingForModel() or IsShown()`, two partial signals that
+		-- between them still span the session -- but only because main.lua's give-up
+		-- path closes the native session on its way out. See IsVaultSessionOpen's own
+		-- comment for what that coupling costs.
+		if not ExtBank:IsVaultSessionOpen() then return end
 		ExtBank:ArmPendingDeposit()
 
 		-- Read the link HERE, not in the check itself: by then the slot may be

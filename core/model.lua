@@ -102,7 +102,37 @@ function ExtBank:ParsePacket(hex)
 	-- the cell loop never arms a deposit, and GetTime() is fixed for the whole
 	-- frame, so no arm can age out midway.
 	local arms = self:HasPendingDeposits()
-	local watchingDeposits = arms > 0
+
+	-- `self.hasModel` is still false here for the session's FIRST packet -- it is
+	-- set below, after the cell loop -- and that is exactly the case the diff
+	-- cannot answer. previousCells is ExtBank.cells, which stays `{}` until
+	-- something has been parsed, so `before` is nil for every record, the
+	-- `not before` arm fires for every occupied cell, and `gained` becomes THE
+	-- ENTIRE VAULT in packet order. CorrectPendingDeposit then walks that list and
+	-- spends its arm on the first entry whose bag is off the current page -- an
+	-- arbitrary item that has sat untouched in some ext bag for weeks, not the
+	-- deposit the arm was raised for -- and drags it onto page 1.
+	--
+	-- Nothing unusual is needed to reach it: core/deposit.lua's watch arms across
+	-- the whole native session by design, so any right-click made between the
+	-- native open and the first snapshot lands here.
+	--
+	-- Skipping the BUILD rather than the correction is what makes this free -- with
+	-- `gained` nil, CorrectPendingDeposit returns on its own first line, and not one
+	-- table is allocated for a list that could only ever be wrong.
+	--
+	-- The arms are deliberately NOT spent on the way past. The first snapshot is the
+	-- answer to ExtBankOpen, not to the click; the click's own answer is still
+	-- coming as a later packet, and that one has a real previousCells to diff
+	-- against. Burning the arms here would silently drop the correction the README
+	-- promises for every deposit made during the wait.
+	--
+	-- This does NOT make CorrectPendingDeposit's `arms` bound redundant -- see the
+	-- note at its own comment. A kind == 0 snapshot still reports every occupied
+	-- cell as newly gained on every LATER full refresh (an unlock confirmation, for
+	-- one), where hasModel is true and the diff runs for real. The bound is what
+	-- caps that at one cell per packet.
+	local watchingDeposits = arms > 0 and self.hasModel
 	local previousCells = self.cells
 	local gained, nGained = nil, 0
 	if watchingDeposits then gained = {} end

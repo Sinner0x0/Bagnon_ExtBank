@@ -276,6 +276,18 @@ this entry describes: *bulk* resolution, borders and icons for every cell at onc
 unprompted by a hover. The queries it needs are the ones the server declines, and
 partial resolution across the grid is still the failure mode for the border feature.
 
+Confirmed in game 2026-08-17, cold-cache test: with `Cache\WDB\enUS`'s `itemcache.wdb`
+and `itemnamecache.wdb` deleted, the placeholder resolves into the full tooltip on the
+first hover — so the server answers hover-triggered single-item queries even from a
+completely empty cache. The native vault UI on the same cold cache renders the miss and
+never recovers until re-hovered, so this is a deliberate improvement over the mirror,
+not a divergence to re-litigate. The same test settled a "regression" report against
+the addon: first-hover tooltips had *seemed* fine for weeks only because the cache was
+warm (every deposited item passes through the player's bags and is cached there), and
+went visibly wrong when a client update wiped the WDB cache — no addon commit changed
+first-hover behaviour. The name-only stub is the split caches: `itemnamecache` can
+answer while `itemcache` still can't.
+
 Note the two symptoms are one cause. A fix for the `?` icons is a fix for the border and
 vice versa; neither can be done without the other, and neither can be done from Lua.
 

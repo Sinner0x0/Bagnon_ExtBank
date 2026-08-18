@@ -102,6 +102,12 @@ function BagFrame:CreatePurchaseButton()
 	b:SetHeight(PURCHASE_BUTTON_HEIGHT)
 	b:SetWidth(PURCHASE_BUTTON_WIDTH)
 	b:SetScript('OnClick', function()
+		-- Both conditions duplicate a state in which UpdatePurchaseButton has
+		-- already hidden this button, so neither is reachable by clicking it. Kept
+		-- for the same reason the MAX_BAGS one always was: what is on the other
+		-- side is a real charge against the player's gold, quoted from a count this
+		-- addon does not own.
+		if not ExtBank.hasModel then return end
 		if ExtBank.unlockedBags >= ExtBank.MAX_BAGS then return end
 		StaticPopup_Show(BagFrame.UNLOCK_POPUP,
 			tostring(ExtBank.unlockedBags + 1),
@@ -193,11 +199,13 @@ function BagFrame:OnModelUpdated()
 	-- OnShow/OnHide/OnItemFrameSizeChange already send so the outer Frame
 	-- catches up to our new size.
 	--
-	-- That case is also the only one a model update can produce here, and it
-	-- happens at most once a session -- a cell delta cannot move this frame at
-	-- all. EXTBANK_MODEL_UPDATED arrives in bursts, so both calls below are
-	-- guarded internally and the burst costs a handful of compares; see
-	-- Relayout and UpdatePurchaseButton for which state each keys on.
+	-- There are exactly two such cases and each fires at most once a session: the
+	-- first snapshot landing (hasModel false -> true, which un-hides the button),
+	-- and the last slot being bought (unlockedBags reaching MAX_BAGS, which hides
+	-- it for good). A cell delta cannot move this frame at all.
+	-- EXTBANK_MODEL_UPDATED arrives in bursts, so both calls below are guarded
+	-- internally and the burst costs a handful of compares; see Relayout and
+	-- UpdatePurchaseButton for which state each keys on.
 	self:UpdatePurchaseButton()
 	self:Relayout()
 end
@@ -237,9 +245,29 @@ end
 -- sits above a strip whose height Layout() (below) recomputes from scratch
 -- every pass, so hiding it hands the space back permanently rather than
 -- reserving a row forever for a button that can never do anything again.
+--
+-- Hidden on `not hasModel` for a different reason and with a different lifetime:
+-- until a snapshot has landed, unlockedBags is its declared default of 0, so
+-- NextSlotCost() returns SLOT_COSTS[1] and this button would offer "bag slot 1"
+-- at 50g -- a number with no basis, attached to a real CMSG_EXTBANK_UNLOCK the
+-- server prices from its own count. A player who owns 6 slots reads that as a
+-- bargain and is charged 5000. The native window has exactly this defect and no
+-- gate on it (extBank.lua's redraw keys on unlockedBags alone).
+--
+-- hasModel is the ONLY thing that separates "no data yet" from a genuinely
+-- zero-slot player, for whom 0 and "Purchase 50g" are both correct -- which is
+-- why the gate reads that flag rather than trying to find something suspicious
+-- about the count itself.
+--
+-- With main.lua's timeout now re-asking the server and then giving up without
+-- showing a window (rather than showing one anyway), ShowWindow is unreachable
+-- while hasModel is false, so this branch is a backstop rather than a live path
+-- -- said plainly here so the next reader does not go hunting for the trigger.
+-- It costs two compares and it is what keeps that property from depending on
+-- main.lua staying the way it is.
 function BagFrame:UpdatePurchaseButton()
-	-- Keyed on the one thing the answer depends on. This runs on every
-	-- EXTBANK_MODEL_UPDATED, where unlockedBags changes only when a slot is
+	-- Keyed on the two things the answer depends on, and nothing else. This runs on
+	-- every EXTBANK_MODEL_UPDATED, where unlockedBags changes only when a slot is
 	-- actually bought -- so unguarded, a burst spent a FormatGold (tostring ->
 	-- reverse -> gsub -> reverse, plus a second gsub) and a format per packet
 	-- to hand SetText a byte-identical string.
@@ -250,12 +278,22 @@ function BagFrame:UpdatePurchaseButton()
 	-- hidden -- core/model.lua keeps parsing packets regardless of what this
 	-- frame is registered for -- and the comparison catches that by itself on
 	-- the next show.
+	--
+	-- hasModel is part of the key, not just of the branch below, and getting that
+	-- wrong is a real bug rather than a missed refresh: for a player who genuinely
+	-- owns no slots, unlockedBags is 0 both before and after their first snapshot.
+	-- Keyed on the count alone, the pre-model pass would cache 0 and hide the
+	-- button, the snapshot would arrive carrying the same 0, the early-out would
+	-- fire -- and the purchase button would stay hidden for the rest of the
+	-- session, for exactly the players who most need it. It flips false -> true
+	-- once per session and never back, so the extra compare is all it costs.
 	local unlocked = ExtBank.unlockedBags
-	if self.shownUnlockedBags == unlocked then return end
-	self.shownUnlockedBags = unlocked
+	local hasModel = ExtBank.hasModel
+	if self.shownUnlockedBags == unlocked and self.shownHasModel == hasModel then return end
+	self.shownUnlockedBags, self.shownHasModel = unlocked, hasModel
 
 	local b = self.purchaseButton
-	if unlocked >= ExtBank.MAX_BAGS then
+	if not hasModel or unlocked >= ExtBank.MAX_BAGS then
 		b:Hide()
 	else
 		b:SetText(('Purchase %s %s'):format(FormatGold(NextSlotCost()), GOLD_ICON))

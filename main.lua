@@ -30,10 +30,18 @@
 
 local Bagnon = LibStub('AceAddon-3.0'):GetAddon('Bagnon')
 
--- AceTimer-3.0 is here for core/deposit.lua's two delayed checks -- 3.3.5 has
--- no C_Timer. It's embedded and loaded by core Bagnon's own embeds.xml, so
--- it's already present by the time this file runs; nothing extra to vendor or
--- declare in the .toc.
+-- AceTimer-3.0 is here for core/deposit.lua's two delayed checks AND for this
+-- file's own first-snapshot wait (ShowWindowOnceModelReady below, which schedules
+-- and cancels a timer on every session's first open) -- 3.3.5 has no C_Timer.
+-- Both callers matter: trimming the mixin on the strength of deposit.lua alone
+-- throws `attempt to call method 'ScheduleTimer' (a nil value)` on the first open
+-- of every session, from inside a handler that has already latched the native
+-- window off -- no vault UI at all, /reload the only way back. A clean
+-- `luac5.1 -p` does not catch it.
+--
+-- It's embedded and loaded by core Bagnon's own embeds.xml, so it's already
+-- present by the time this file runs; nothing extra to vendor or declare in the
+-- .toc.
 local ExtBank = Bagnon:NewModule('ExtBank', 'AceEvent-3.0', 'AceTimer-3.0')
 
 -- Shared with every other file in this addon -- the core/ logic files and the
@@ -182,7 +190,35 @@ end
 -- populated window to show immediately -- the fresh snapshot each open
 -- after that just updates it quietly in place, no visible jump -- so only
 -- this session's first open needs to wait.
+-- Lifecycle state for the whole open..close sequence below.
+--
+-- Declared HERE, above the first function that reads them, rather than further
+-- down beside the wait they belong to: Lua 5.1 resolves upvalues lexically at
+-- compile time, so a `local` written after OnNativeOpen is simply invisible to it
+-- -- the name would silently read a nil GLOBAL of the same name instead, with no
+-- error at load and no error at call. The old placement got away with it only
+-- because nothing above it touched them directly.
+--
+-- nativeSessionOpen: true from the moment ProjectEbonhold's ExtBank_Open ran
+-- until its ExtBank_Close does. Deliberately NOT the same question as "is our
+-- window shown" -- see IsVaultSessionOpen below.
+local nativeSessionOpen = false
+
+-- The session's first-snapshot wait: whether one is running, its timeout handle,
+-- and whether this open has already spent its one retry.
+local waitingForModel = false
+local pendingShowTimer = nil
+local retriedFirstSnapshot = false
+
 function ExtBank:OnNativeOpen()
+	-- First, and before HideNativeWindow can latch anything: from here on the
+	-- native side believes the vault is open and its own right-click deposit is
+	-- live, so core/deposit.lua's watch has to be armed for every click made
+	-- between now and the close -- including the ones made while nothing of ours
+	-- is on screen, which after the changes below is a state that can last for
+	-- the whole of an open.
+	nativeSessionOpen = true
+
 	self:HideNativeWindow()
 
 	if self.hasModel then
@@ -192,8 +228,32 @@ function ExtBank:OnNativeOpen()
 	end
 end
 
+-- Reached on EVERY close path, not only a native one: the X button and Escape
+-- hide our frame, components/frame.lua's OnHide calls _G.ExtBank_Close(), and
+-- core/nativeHooks.lua's wrapper on that global lands right back here. That makes
+-- this the one funnel which does not require our window to have ever been SHOWN
+-- -- which is why the deposit clear below lives here as well as in Frame:OnHide.
 function ExtBank:OnNativeClose()
+	nativeSessionOpen = false
 	self:CancelPendingShow()
+
+	-- Deliberately duplicated with components/frame.lua's OnHide rather than moved
+	-- out of it. OnHide is the funnel for a frame that is actually shown; while the
+	-- first-snapshot wait below is running -- or after it has given up -- the window
+	-- has never been Show()n this session, so Hide() on it runs no OnHide script at
+	-- all and every arm survives the close. core/deposit.lua arms in exactly that
+	-- gap by design, so without this those arms outlive the window they were raised
+	-- for: any packet landing inside DEPOSIT_RESPONSE_WINDOW then runs
+	-- CorrectPendingDeposit against a closed vault, which is either a UIErrorsFrame
+	-- line printed for a window that is not on screen or an unrequested
+	-- MoveWithinVault reshuffling a vault nobody is looking at.
+	--
+	-- Only the deposit arms, though -- not the pick or the purchase popup that
+	-- OnHide also clears. Both of those can only be created by clicking something
+	-- inside our own window, so neither can exist in the never-shown state this is
+	-- here to cover.
+	self:ClearPendingDeposit()
+
 	Bagnon.FrameSettings:Get(self.FRAME_ID):Hide()
 end
 
@@ -201,37 +261,60 @@ function ExtBank:ShowWindow()
 	Bagnon.FrameSettings:Get(self.FRAME_ID):Show()
 end
 
-local waitingForModel = false
-local pendingShowTimer = nil
-
--- How long to wait for the session's first snapshot before showing the window
--- anyway. Comfortably past the ~100ms a snapshot actually takes (measured, see
--- docs/non-issues.md §10) -- this is a backstop for a snapshot that is never
--- coming, not a race against a slow one.
-local FIRST_SHOW_TIMEOUT = 3 -- seconds
-
--- Read by core/deposit.lua: the deposit watch has to arm during this wait too.
--- The native side considers the vault open from the moment ExtBank_Open runs, so
--- its own right-click deposit is live throughout -- while our FrameSettings:IsShown()
--- is still false, which is what the watch used to gate on by itself.
-function ExtBank:IsWaitingForModel()
-	return waitingForModel
+-- Read by core/deposit.lua: the deposit watch has to arm for the whole native
+-- session, not just for the part of it our window happens to be on screen for.
+--
+-- Replaces an `IsWaitingForModel() or FrameSettings:IsShown()` pair that reached
+-- for this question through two proxies -- "a first-show wait is running" and
+-- "our window is up" -- on the reasoning that between them they spanned the
+-- session. They still do, but now only because GiveUpOnFirstShow below remembers
+-- to call _G.ExtBank_Close(): drop that call, or let it fall through its type()
+-- guard on a client where the global is missing, and the give-up leaves a session
+-- the native side still considers open with neither proxy true. The watch would
+-- then be disarmed for the rest of that open -- taking the stuck-item warning
+-- with it, in precisely the state where the server is least healthy and a refused
+-- deposit is most likely. Asking the real question costs one flag and stops the
+-- answer being something two files have to keep agreeing about.
+--
+-- Nothing is lost by dropping the IsShown() arm: ShowWindow is only ever reached
+-- from inside a session, so a shown window already implies this flag.
+function ExtBank:IsVaultSessionOpen()
+	return nativeSessionOpen
 end
 
--- Deliberately not an open-ended wait. HideNativeWindow (core/nativeHooks.lua)
--- has already hooked the native frames' Show straight to Hide and latched for the
--- session by the time we get here, so if the snapshot never lands there is no
--- vault UI left at all: ours never shows, theirs can no longer show, and nothing
--- is printed. Reopening cannot recover it -- the hook is already installed --
--- leaving /reload as the only way back. Any of a dropped ExtBankOpen, a throw
--- inside ProjectEbonhold's own packet handler, or a server hiccup gets there.
+-- How long to wait for the session's first snapshot before acting on its absence.
+-- Comfortably past the ~100ms a snapshot actually takes (measured, see
+-- docs/non-issues.md §10) -- this is a backstop for a snapshot that is never
+-- coming, not a race against a slow one. Spent twice per open: once before the
+-- retry, once before giving up.
+local FIRST_SHOW_TIMEOUT = 3 -- seconds
+
+-- Deliberately not an open-ended wait -- and deliberately not a "show it anyway"
+-- backstop either. HideNativeWindow (core/nativeHooks.lua) has already hooked the
+-- native frames' Show straight to Hide and latched for the session by the time we
+-- get here, so if the snapshot never lands there is no vault UI left at all: ours
+-- never shows, theirs can no longer show. Any of a dropped ExtBankOpen, a throw
+-- inside ProjectEbonhold's own packet handler, a recv handler stranded on a
+-- reconnected NetClient, or a plain server hiccup gets there.
 --
--- The timeout shows the window regardless. It will be empty and undersized until
--- some later packet fills it, which is the very thing waiting was meant to avoid
--- -- but an ugly window the player can close beats no window at all.
+-- This USED to show the window regardless, reasoning that "an ugly window the
+-- player can close beats no window at all". That is sound about the APPEARANCE of
+-- the window and wrong about what sits behind it. With no snapshot the model is
+-- not merely empty, it is WRONG, and subsystems downstream read it as
+-- authoritative: unlockedBags is 0, so the strip renders all 70 slots locked and
+-- the purchase button quotes 50g for "bag slot 1" -- a real price attached to a
+-- real CMSG_EXTBANK_UNLOCK, which the server then prices from its own count. A
+-- player who owns 6 slots reads 50g as a bargain and is charged 5000. That is the
+-- one failure here that costs real currency, and it lived on the one code path
+-- that exists precisely BECAUSE the model is known to be missing.
+--
+-- So the timeout re-asks the server instead (RequestSnapshot), and if that goes
+-- unanswered too it gives up in a way the player can see and act on
+-- (GiveUpOnFirstShow) rather than painting a window backed by zeros.
 function ExtBank:ShowWindowOnceModelReady()
 	if waitingForModel then return end
 	waitingForModel = true
+	retriedFirstSnapshot = false
 	Bagnon.Callbacks:Listen(self, 'EXTBANK_MODEL_UPDATED', 'OnModelReadyForFirstShow')
 	pendingShowTimer = self:ScheduleTimer('OnFirstShowTimeout', FIRST_SHOW_TIMEOUT)
 end
@@ -259,22 +342,113 @@ function ExtBank:OnModelReadyForFirstShow()
 	self:ShowWindow()
 end
 
+-- Two stages, one timer: the first expiry re-asks the server, the second gives up
+-- on this open. Both are reached only while a wait is still live -- a snapshot
+-- landing or the player closing in between cancels the timer and clears the flag.
+--
+-- A retry that could not be sent at all (no native) falls straight through to the
+-- give-up rather than burning the second three seconds waiting for an answer to a
+-- question that was never asked.
 function ExtBank:OnFirstShowTimeout()
 	pendingShowTimer = nil
 	if not waitingForModel then return end
 
+	if not retriedFirstSnapshot then
+		retriedFirstSnapshot = true
+		if self:RequestSnapshot() then
+			pendingShowTimer = self:ScheduleTimer('OnFirstShowTimeout', FIRST_SHOW_TIMEOUT)
+			return
+		end
+	end
+
 	self:CancelPendingShow()
-	self:ShowWindow()
+	self:GiveUpOnFirstShow()
+end
+
+-- Re-send CMSG_EXTBANK_OPEN, once, when the first one went unanswered.
+--
+-- _G.ExtBankOpen -- the ebonhold.dll native -- and NOT _G.ExtBank_Open, which is
+-- extBank.lua's own UI function and one we have chained (core/nativeHooks.lua).
+-- Calling that one re-enters our own wrapper: previousOpen re-anchors and
+-- re-Show()s both native frames, calls HideBankPanel() a second time, and then
+-- comes back through OnNativeOpen to arm a fresh wait on top of the one that is
+-- already running. The native is the request and nothing else.
+--
+-- This is worth more than a hopeful re-send, which is the whole reason it is here
+-- rather than a straight give-up at 3s. Lua_ExtBankOpen
+-- (ebonhold-reference/ebonhold-utils/extbank_client.h) does EnsureHandler()
+-- BEFORE it sends, which re-registers the SMSG_EXTBANK_UPDATE handler on the LIVE
+-- NetClient -- the header documents that call as idempotent, "safe to call
+-- often", and specifically as the repair for a NetClient object recreated by a
+-- reconnect. A recv handler stranded on a stale NetClient is one of the concrete
+-- ways the first snapshot goes missing, and it is one this call actually fixes.
+-- Its SendMsg also no-ops with "NetClient not ready" when not connected, another
+-- transient a second attempt covers.
+--
+-- ONCE, though, and never on a timer of its own. A server that is not answering
+-- will not start because we asked a third time, and nothing on this side can see
+-- what the packets cost.
+--
+-- Returns whether the request actually went out, matching the convention every
+-- other native call in this file follows.
+function ExtBank:RequestSnapshot()
+	if type(_G.ExtBankOpen) ~= 'function' then return false end
+
+	_G.ExtBankOpen()
+	UIErrorsFrame:AddMessage('Void Storage: no response yet -- asking the server again', 1, 0.8, 0)
+	return true
+end
+
+-- Give up on this open: no window of ours, and the native's stays suppressed.
+-- What is left is a message and a vault session that has to be closed properly.
+--
+-- Closing it is not tidiness, it is the difference between one click and two.
+-- extBank.lua's toggle button and both its slash commands branch on its own
+-- isOpen upvalue -- `if isOpen then ExtBank_Close() else ExtBank_Open() end` --
+-- which is still true here, and the only thing that ever tells it otherwise is a
+-- real ExtBank_Close(). Normally components/frame.lua's OnHide makes that call
+-- when our window closes; on this path there is no window and never was, so
+-- nothing would. The player's next click on Void Storage would take the
+-- ExtBank_Close() branch and read as a dead button, and only the click after it
+-- would retry -- exactly the "click Void Storage twice to reopen it" bug
+-- frame.lua's own header documents, reinstated by the give-up. Calling it here is
+-- what keeps the advice in the message below honest.
+--
+-- It also runs extBank.lua's own ExtBankSetActive(0), which matters away from a
+-- banker: there is no BANKFRAME_CLOSED coming to clean up after us there, and the
+-- DLL's native-bank deposit suppression would otherwise stay armed with no vault
+-- to deposit into.
+--
+-- Safe to call unconditionally, and non-recursive: core/nativeHooks.lua's wrapper
+-- on the global sets closingFromNative for the duration, and OnNativeClose does
+-- not call back into ExtBank_Close.
+--
+-- DEFAULT_CHAT_FRAME rather than UIErrorsFrame, unlike the retry line above: this
+-- is the one message in the sequence the player needs to still be able to read a
+-- few seconds later, which is the same reason core/deposit.lua's stuck-item
+-- warning prints there. Same shape as it, too -- red prefix, one |cffffd200Fix:|r
+-- clause -- so the two read as one voice rather than two addons.
+function ExtBank:GiveUpOnFirstShow()
+	if type(_G.ExtBank_Close) == 'function' then
+		_G.ExtBank_Close()
+	end
+
+	DEFAULT_CHAT_FRAME:AddMessage('|cffff5555Void Storage:|r the server did not answer -- no window was opened, rather than an empty one. |cffffd200Fix:|r click Void Storage again to retry.')
 end
 
 
 --[[ Actions (thin wrappers over the native calls) ]]--
 -- No mechanic is reimplemented here -- these just call the same natives
--- extBank.lua itself uses, with the same addressing convention. There's
--- deliberately no ExtBankOpen wrapper: opening is never something we
+-- extBank.lua itself uses, with the same addressing convention.
+--
+-- ExtBankOpen is deliberately not among them: opening is never something we
 -- initiate, only something we react to, and the native has already sent the
--- request by the time our hook runs (see OnNativeOpen above) -- so a wrapper
--- here would only ever be a way to double-send it.
+-- request by the time our hook runs (see OnNativeOpen above) -- so a wrapper here
+-- would only ever be a way to double-send it. RequestSnapshot above is the single
+-- exception, and it stays up there with the wait rather than moving down into
+-- this group, because it is not an action any part of the UI can reach: it
+-- re-asks a question the native already asked on this same open and never got an
+-- answer to, once, from the timeout path only.
 
 -- Every one of these returns whether the request actually went out, and callers
 -- are expected to check.
