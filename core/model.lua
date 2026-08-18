@@ -128,10 +128,13 @@ function ExtBank:ParsePacket(hex)
 	-- promises for every deposit made during the wait.
 	--
 	-- This does NOT make CorrectPendingDeposit's `arms` bound redundant -- see the
-	-- note at its own comment. A kind == 0 snapshot still reports every occupied
-	-- cell as newly gained on every LATER full refresh (an unlock confirmation, for
-	-- one), where hasModel is true and the diff runs for real. The bound is what
-	-- caps that at one cell per packet.
+	-- note at its own comment. What the hasModel gate removes is the DEGENERATE
+	-- list, the one where every occupied cell reads as gained because there is no
+	-- previous model to diff it against. A LATER kind == 0 refresh (an unlock
+	-- confirmation is one) has previousCells pointing at real pre-snapshot
+	-- contents, so it reports only what actually changed -- but "what changed" is
+	-- still not "what the player clicked", and the bound is what keeps the
+	-- correction proportional to the clicks rather than to the packet.
 	local watchingDeposits = arms > 0 and self.hasModel
 	local previousCells = self.cells
 	local gained, nGained = nil, 0

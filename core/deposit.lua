@@ -268,10 +268,24 @@ end
 -- on essentially every deposit, so treat it as a hot path, not an edge case.
 --
 -- Bounded by the number of live arms, and that bound is load-bearing rather
--- than tidiness: a kind == 0 snapshot reports every occupied cell as newly
--- gained, because ClearModel wipes the model before the cell list is applied.
--- Without the bound, one armed click answered by a full refresh would march the
--- entire vault onto the current page.
+-- than tidiness: `gained` is "cells this packet put items into", which is not
+-- the same list as "deposits the player just made". A packet can name more
+-- changed cells than there are outstanding clicks -- a stack merging into one
+-- already in the vault, a move made inside the vault, or a kind == 0 refresh
+-- landing while our model has drifted behind the server's. The bound keeps the
+-- correction proportional to what was actually clicked: one relocation per
+-- answered click, never one per changed cell.
+--
+-- This used to be justified as "a kind == 0 snapshot reports every occupied cell
+-- as newly gained, because ClearModel wipes the model before the cell list is
+-- applied". Do not restore that reading -- it outlived the code it described,
+-- and a reviewer has already believed it and written up a repro that cannot
+-- happen. ClearModel (core/model.lua) assigns FRESH tables rather than emptying
+-- the existing ones, and ParsePacket captures the old cell table before calling
+-- it, so a full refresh diffs against real previous contents and reports only
+-- what genuinely changed. A whole-vault `gained` list needs an EMPTY previous
+-- model, which is the session's first snapshot alone -- and ParsePacket does not
+-- build `gained` at all on that one.
 --
 -- ARM LIFECYCLE -- an arm dies only by being SPENT on an answer, or by ageing
 -- out of DEPOSIT_RESPONSE_WINDOW. It is never spent merely because a packet
@@ -334,7 +348,34 @@ function ExtBank:CorrectPendingDeposit(gained, arms)
 		itemFrame:ClampCurrentPage()
 	end
 
-	local complained
+	-- Latched the first time the page turns out to have nowhere to put anything,
+	-- and then never asked again. Two jobs, both of which were previously done by
+	-- a `return`:
+	--
+	--   1. The answer cannot change within one packet. Nothing in this loop frees
+	--      a page slot -- our own relocations only claim more of them -- so a
+	--      second GetCurrentPageFreeSlot would rescan every visible bag to reach
+	--      the same nil.
+	--   2. One message per packet, not one per item. A bulk deposit into a full
+	--      page would otherwise print the same line a dozen times.
+	--
+	-- What the `return` also did was walk away from gained[2..n] with their arms
+	-- still live, and that is the part being fixed. Every off-page cell here is an
+	-- answered click whether or not there is room for it -- the rule the comment
+	-- below states, applied to the first cell only. Left live, those arms sit out
+	-- the rest of DEPOSIT_RESPONSE_WINDOW and are then credited to the next
+	-- off-page cell any packet inside it reports -- an in-vault move of the
+	-- player's own, a stack merging in the vault, a resync -- which is read as the
+	-- answer to a click that was answered several seconds ago, and dragged onto
+	-- the current page. Closing the window clears them, but the player is mid-burst
+	-- with the vault open by construction, so that is no escape here.
+	--
+	-- Spending the REMAINING arms outright instead would be wrong for the same
+	-- reason the loop skips on-page cells: an arm answered by an on-page landing
+	-- is deliberately left unspent (see the ARM LIFECYCLE note above), and a blind
+	-- consume loop cannot tell those apart. Hence a latch and a full walk rather
+	-- than a `break`.
+	local noRoom
 	for i = 1, #gained do
 		if arms == 0 then return end
 
@@ -347,26 +388,26 @@ function ExtBank:CorrectPendingDeposit(gained, arms)
 			arms = arms - 1
 			self:ConsumePendingDeposit()
 
-			local dstBag, dstSlot, why = self:GetCurrentPageFreeSlot()
-			if not dstBag then
-				-- Once per packet, not once per item -- a bulk deposit into a
-				-- full page would otherwise print the same line a dozen times.
-				if not complained and why ~= 'nowindow' then
-					complained = true
-					if why == 'nobags' then
-						UIErrorsFrame:AddMessage('Void Storage: no bag shown on this page -- item stored on another page', 1, 0.8, 0)
-					else
-						UIErrorsFrame:AddMessage('Void Storage: current page is full -- item stored on another page', 1, 0.8, 0)
+			if not noRoom then
+				local dstBag, dstSlot, why = self:GetCurrentPageFreeSlot()
+				if dstBag then
+					-- Claimed only if the request actually went out. Move returns false when
+					-- ebonhold.dll's native is not callable, and claiming a cell we never
+					-- asked for would block it for the whole response window.
+					if self:MoveWithinVault(landed.bagIndex, landed.slot, dstBag, dstSlot) then
+						self:ClaimSlot(dstBag, dstSlot)
+					end
+				else
+					noRoom = true
+
+					if why ~= 'nowindow' then
+						if why == 'nobags' then
+							UIErrorsFrame:AddMessage('Void Storage: no bag shown on this page -- item stored on another page', 1, 0.8, 0)
+						else
+							UIErrorsFrame:AddMessage('Void Storage: current page is full -- item stored on another page', 1, 0.8, 0)
+						end
 					end
 				end
-				return
-			end
-
-			-- Claimed only if the request actually went out. Move returns false when
-			-- ebonhold.dll's native is not callable, and claiming a cell we never
-			-- asked for would block it for the whole response window.
-			if self:MoveWithinVault(landed.bagIndex, landed.slot, dstBag, dstSlot) then
-				self:ClaimSlot(dstBag, dstSlot)
 			end
 		end
 	end
