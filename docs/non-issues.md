@@ -596,9 +596,10 @@ exists. Cursor payloads are not something Lua can synthesise on 3.3.5a.
 What *was* addressed is the consequence rather than the cause: the origin cell now
 carries a highlight for as long as a pick is outstanding (`ItemSlot:UpdatePicked`,
 driven by `EXTBANK_PICK_CHANGED`), a right-click always means "withdraw" instead of
-being spent completing a forgotten move, and the pick is cleared by the bag strip as
-well as by the cell paths and `Frame:OnHide`. So the state is visible and short-lived
-even though it is not on the cursor.
+being spent completing a forgotten move, and the pick is cleared by the bag strip's
+*click* path as well as by the cell paths and `Frame:OnHide`. So the state is visible
+and short-lived even though it is not on the cursor. (The strip's *drop* path
+deliberately does not clear it, and does not need to — §15.)
 
 **Not cleared by paging, and that is deliberate.** The page bar and the mouse wheel
 briefly did clear it, on the reasoning that a re-flowed grid would let the pick
@@ -621,3 +622,141 @@ they did not intend would be the signal. The fix would be a cue that survives pa
 step, which has now been tried and cost the feature.
 
 *Entries 12 and 13 dispositioned 2026-08-17 alongside the correctness pass.*
+
+---
+
+## 14. The options header keys `GetAddOnMetadata` on a hardcoded folder name
+
+**Where:** [`components/frameOptions.lua`](../components/frameOptions.lua) —
+`local ADDON_NAME = 'Bagnon_ExtBank'`, read once by
+`GetAddOnMetadata(ADDON_NAME, 'Title')`.
+
+**What gets flagged.** `GetAddOnMetadata` keys on the addon's **folder** name, and
+that literal is a guess about how the addon was installed. GitHub's "Download ZIP"
+extracts as `Bagnon_ExtBank-<branch>`, so the lookup returns nil for anyone who did
+not clone — and nil into `%s` is not a blank, it is a throw:
+
+```
+$ lua5.1 -e "print(('%s'):format(nil))"
+bad argument #1 to 'format' (string expected, got nil)
+```
+
+Worse, the throw lands inside the `ADDON_LOADED` handler, *after* the frame-selector
+patch above it has installed and *before* everything below — including the
+`UpdateWidgets` wrap at the bottom of the file. The player would get a working
+"Void Storage" dropdown entry with no slider, no credit block, and the live "Enable
+Bag Frame" checkbox this file's own long note calls a trap. Escalated as a release
+blocker on that reading, and 3.3.0 added the obvious fix: `local ADDON_NAME = ...`,
+the chunk vararg, which is the real folder name.
+
+**Why it stays: a renamed folder does not load at all.** The client resolves an addon
+as `Interface\AddOns\<Folder>\<Folder>.toc`. Rename the folder on its own — which is
+exactly what a ZIP install *is* — and the `.toc` inside no longer matches it. Tested
+in game on the live Ebonhold client, not reasoned about:
+
+> Renamed the folder in `Interface\AddOns` → character select → the addon is not in
+> the AddOns list at all, and nothing of it runs in game.
+
+So the scenario cannot produce the throw. It produces an addon that is simply absent,
+which is loud, immediate, and fixed by the rename every addon README already asks
+for. There is no half-patched options panel and no live checkbox, because no line of
+this addon ever executes.
+
+The release path is not exposed either. `.github/scripts/build.sh` stages into
+`build/Bagnon_ExtBank/` and zips *that folder*, so the asset extracts under the
+correct name whatever the tag calls the `.zip`.
+
+**What is genuinely left**, once the false premise is removed: renaming **both** the
+folder and the `.toc` to match. That loads normally and does make every
+`GetAddOnMetadata('Bagnon_ExtBank', …)` here answer nil. It is a deliberate two-step
+by someone who has already learned the two names must agree — not a default install
+path — and it costs one line in one options panel.
+
+**And the vararg is not the one-liner it looks like.** Only `main.lua` is listed in
+the `.toc`; every other file in this addon, `frameOptions.lua` included, loads through
+`core.xml` / `components.xml`. Whether the addon-name vararg survives a
+`<Script file="">` hop on 3.3.5a is not settled by the 3.3.5 documentation, and a
+sweep of a stock install (~60 addons, Ace3, Auctionator, WeakAuras, NotPlater's own
+3.3.5 port) found **no** XML-loaded file anywhere that captures it — the idiom is only
+ever used in `.toc`-listed files. Closing this properly therefore means a capture in
+`main.lua`, a type guard for the client that hands over nothing, and a third piece of
+identity state on the module table, to cover a case reached only by renaming both
+halves. Nothing else in the addon wants the folder name: there are no
+`SavedVariables` and no `Interface\AddOns\…` texture paths, so this literal has
+exactly one consumer.
+
+**Reopen if:** a player is actually observed with a renamed folder *and* a matching
+renamed `.toc` — a support report of the options panel missing its slider and credits
+is the signal — or anything in this addon starts needing the folder name for a real
+path (a texture of our own would do it). The minimal fix then is
+`GetAddOnMetadata(ADDON_NAME, 'Title') or 'Bagnon ExtBank'` at the format site: one
+expression, no load-order assumptions, and it holds whatever the lookup fails on. The
+vararg capture is only worth its three files if that second trigger arrives.
+
+*Premise disproved in game 2026-08-17, after being raised as a blocker by that day's
+review.*
+
+---
+
+## 15. The bag strip's drop path does not clear the in-vault pick, unlike its click path
+
+**Where:** [`components/bag.lua`](../components/bag.lua) — `Bag:OnReceiveDrag`, against
+the `ExtBank:ClearPick()` that `Bag:OnClick` opens with.
+
+**What gets flagged.** `Bag:OnClick` clears the pick first thing and states why:
+*"Toggling a bag's contents re-flows the grid, and unequipping one removes cells
+outright, so a pick armed before this click would complete itself onto a cell the
+player never aimed at."* `Bag:OnReceiveDrag` is an `IsLocked()` early return and a
+`DropCarriedBag()`, and clears nothing — nor does `DropCarriedBag`, while
+`components/item.lua`'s own drop route does. Two drop paths on one widget that
+disagree, reading as a fix applied to the click half and never carried across.
+
+The two really are separate events, not two names for one. Click-pickup the bag in
+your bags and click a strip slot, and the slot gets `OnClick`, which clears. Press and
+hold on the bag, drag, and release over the slot, and it gets `OnReceiveDrag` only —
+the mouse-down landed on a frame in the bags window, so no `OnClick` follows. The
+2026-08-17 review filed that as a should-fix with a one-line remedy: `ExtBank:ClearPick()`
+at the top of `OnReceiveDrag`.
+
+**Why it stays: the rationale does not transfer.** `OnClick`'s two cases *remove*
+cells — toggling drops a bag out of `GetAllVisibleBags`, unequipping removes it
+outright, and unequipping can destroy the very cell `pickSrc` names. `OnReceiveDrag`
+has exactly one outcome: a bag equipped into an empty strip slot. That only ever
+*adds* cells, and it cannot touch the pick's source bag.
+
+**Tested in game 2026-08-17**, both shapes, with a pick armed before the drop:
+
+> **Equipping into the first free slot** — no grid movement at all. The new index
+> sorts above every equipped one, so `ItemFrame:GetAllVisibleBags` (ascending strip
+> order, `GetBagSize > 0`) appends it and nothing already placed changes position or
+> page.
+>
+> **Equipping into a gap** — unequip a middle bag, equip a new one into the hole. Here
+> the viewed page *does* change, the inserted index shifting every later bag one
+> position along the page slice. The pick survives it, and completing it afterwards
+> moves the item onto the cell clicked, correctly.
+
+`pickSrc` holds absolute `{ bagIndex, slot }` and the destination is read off the cell
+the player actually clicks, so a re-flow changes what is on screen, not what the pick
+names — the same fact §13 records against the page bar. Reverse Slot Order turns every
+equip into the gap-fill shape (the reversed iterator puts the new high index first),
+which is the same mechanism as the case tested, not a further one.
+
+**And the fix would cost a working gesture.** Arm a pick, equip a bag, complete the
+pick is a coherent sequence, and the test above is exactly it. `ClearPick` in
+`OnReceiveDrag` deletes it — the same shape of mistake as the page-bar clear §13
+already tried and reverted: reasoning about a re-flow hazard that absolute coordinates
+do not have, paid for with a move the addon actually supports.
+
+**What is genuinely left** is not this entry's to hold: after a re-flow that pushes the
+origin cell off the viewed page, an outstanding pick has no on-screen cue until the
+player pages back. That is §13's *Known gap*, reached identically by the page bar and
+bounded by `Frame:OnHide` either way.
+
+**Reopen if:** the strip's drop path gains an outcome that removes cells — a drop onto
+an *occupied* strip slot that swaps or unequips rather than being refused (§11 records
+the server's current refusal) — in which case `OnClick`'s rationale applies verbatim
+and the one-liner is right. A player report of a vault move they did not intend,
+traced to a pick armed before a bag equip, would do it too.
+
+*Investigated in game 2026-08-17, after that day's review raised it as a should-fix.*
