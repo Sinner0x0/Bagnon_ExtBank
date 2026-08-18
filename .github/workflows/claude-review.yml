@@ -1,0 +1,86 @@
+name: Claude Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+  # Required, and not optional the way the name suggests: the action does not
+  # use GITHUB_TOKEN directly. It requests an OIDC token from the runner and
+  # exchanges it for a scoped GitHub token of its own. Without this scope the
+  # runner never sets ACTIONS_ID_TOKEN_REQUEST_URL, so the request fails before
+  # any review work starts -- "Unable to get ACTIONS_ID_TOKEN_REQUEST_URL env
+  # variable", retried three times and then fatal. Note that naming any
+  # `permissions:` key at all drops every scope not listed to `none`, so this
+  # has to be spelled out here even though the default token would have had it.
+  id-token: write
+
+  # `issues: read` is the minimum this needs today — the action reads linked
+  # issues for context on the PR.
+  #
+  # TODO: raise to `issues: write` when we want issue-driven work as well —
+  # commenting `@claude` on an issue to have it investigate or open a fix PR.
+  # That needs the write scope (to reply on the issue) plus an `issue_comment`
+  # trigger added above. Deliberately not enabled yet: every issue comment in a
+  # public repo would then be a potential billed run, so it wants a trigger
+  # guard before it goes on.
+  issues: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # Skip drafts, and skip PRs from forks: GitHub does not expose secrets to
+    # fork PRs, so CLAUDE_CODE_OAUTH_TOKEN would be empty and the job would fail on
+    # every outside contribution. (`pull_request_target` is the usual
+    # workaround and is deliberately avoided — it runs with write access
+    # against untrusted code.)
+    if: >
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # needs history to diff against the base branch
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          # Subscription auth instead of a metered API key: generate the token
+          # locally with `claude setup-token` (Pro/Max only) and store it as the
+          # CLAUDE_CODE_OAUTH_TOKEN repo secret. Runs then draw on the
+          # subscription's usage limits rather than console.anthropic.com credit.
+          # This is an input, not an env var — the API-key path used `env:`.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # claude_args takes Claude CLI flags as a string — not JSON.
+          claude_args: "--model claude-opus-5"
+          use_sticky_comment: true # update one comment instead of adding one per push
+          prompt: |
+            Review this PR to Bagnon_ExtBank, a World of Warcraft 3.3.5a (WotLK,
+            build 12340) addon that renders ProjectEbonhold's custom "ExtBank"
+            container as a Bagnon window.
+
+            Prioritise, in order:
+
+            1. Lua 5.1 / 3.3.5a API correctness. This client long predates the
+               retail C_* namespaces. Flag any retail-only API, any 5.2+ syntax
+               (goto, integer division, bitwise operators), and any frame
+               template that does not exist in 3.3.5a.
+            2. Accidental globals — a missing `local` leaks into _G and can
+               taint unrelated addons. This is the most common real defect in
+               addon code and is invisible in review.
+            3. Hook safety. Hooks on ExtBank_OnPacket / ExtBank_Open /
+               ExtBank_Close must save the previous value and chain to it, and
+               stay gated on PLAYER_LOGIN. Never clobber.
+            4. State that outlives the window when it should not — a stale
+               pick or pending-deposit left set across close/reopen, causing a
+               later click to move the wrong item.
+            5. Frame and table churn in the item-grid recycling path.
+
+            Report each finding as file:line with a concrete failure scenario:
+            what the player does, and what goes wrong as a result. Skip style,
+            naming, and formatting preferences — those are not what this review
+            is for.

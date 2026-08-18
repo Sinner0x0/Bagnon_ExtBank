@@ -1,0 +1,24 @@
+#!/bin/sh
+#
+# Stamps the version and date into Bagnon_ExtBank.toc and main.lua (see
+# .github/scripts/stamp-version.sh) and re-stages both, so every commit already
+# carries values that agree with each other.
+#
+# This is a pre-COMMIT hook rather than the pre-push one you might expect, for
+# a mechanical reason: git works out exactly what a push will send BEFORE
+# pre-push runs, so a pre-push hook that edits tracked files leaves those edits
+# sitting in the working tree and pushes the old content regardless. Commit
+# time is the only point where an automatic edit actually ends up in what you
+# push. .githooks/pre-push still verifies the result.
+#
+# Caveat worth knowing: this `git add`s the WHOLE of each file it touches. If
+# you are ever staging main.lua a hunk at a time, check `git diff --cached`
+# before committing.
+set -e
+
+root="$(git rev-parse --show-toplevel)"
+
+bash "$root/.github/scripts/stamp-version.sh"
+
+# Only the two files the script is allowed to write.
+git add -- "$root/Bagnon_ExtBank.toc" "$root/main.lua"

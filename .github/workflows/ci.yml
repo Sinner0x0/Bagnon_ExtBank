@@ -1,0 +1,67 @@
+name: CI
+
+# Validates the addon on every PR into main. Never publishes anything —
+# releasing is release.yml's job, and it runs after the merge.
+#
+# `branches:` filters on the PR's BASE branch, not its head, so this covers
+# every PR targeting main regardless of what it was opened from: dev, a
+# feature branch, a hotfix. There is deliberately no `push:` trigger — with
+# one, every push to dev would run this a second time while its PR is open.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lua 5.1
+        # 5.1 specifically: that is what the 3.3.5a client runs. A 5.4 parser
+        # would happily accept goto/integer-division syntax the game rejects.
+        run: sudo apt-get update && sudo apt-get install -y lua5.1
+
+      - name: Syntax-check every Lua file
+        # A syntax error means the addon silently fails to load in-game with no
+        # error shown to the player, so this is the highest-value check here.
+        # xargs returns non-zero if any file fails to parse.
+        run: find . -name '*.lua' -print0 | xargs -0 -r -n1 luac5.1 -p
+
+      - name: Check .toc metadata
+        run: |
+          toc=$(tr -d '\r' < Bagnon_ExtBank.toc)
+          echo "$toc" | grep -q '^## Interface: [0-9]\+' \
+            || { echo "::error::.toc is missing '## Interface:'"; exit 1; }
+          echo "$toc" | grep -q '^## Version: [0-9]\+\.[0-9]\+\.[0-9]\+' \
+            || { echo "::error::.toc needs '## Version: MAJOR.MINOR.PATCH' — release.yml reads it"; exit 1; }
+
+      - name: Check the version/date stamp is in sync
+        # main.lua carries its own copy of the version and date, because that
+        # is what the options panel can actually print after a /reload — .toc
+        # metadata is only re-read on a full client restart. This fails the PR
+        # if the two copies disagree. The pre-commit hook keeps them together
+        # locally, but hooks are not cloned with the repo and `--no-verify`
+        # skips them, so the guarantee has to be re-made here.
+        run: bash .github/scripts/stamp-version.sh --check
+
+      - name: Build the zip
+        id: build
+        # build.sh also validates that every file referenced by the .toc and by
+        # the XMLs actually exists, and fails if one is missing — same failure
+        # mode as a syntax error (addon silently does not load) and just as
+        # invisible in a diff review. That check lives in the script rather than
+        # here so the release path gets it too, not just PRs.
+        run: bash .github/scripts/build.sh
+
+      - name: Upload the zip for testing
+        # So the exact artifact a release would ship can be installed and tested
+        # in the live client before the PR is merged — rather than testing a
+        # working copy and hoping the build matches it.
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bagnon_ExtBank-pr${{ github.event.number }}
+          path: ${{ steps.build.outputs.zip }}

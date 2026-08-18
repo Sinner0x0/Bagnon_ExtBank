@@ -1,0 +1,49 @@
+name: Release
+
+# Publishes a GitHub Release when a new version lands on main.
+#
+# The .toc's `## Version:` is the trigger, not the push itself: this reads it,
+# and releases only if no matching tag exists yet. So bumping the version in the
+# PR you want released is what ships it, and merging anything else (docs, a
+# refactor) is a no-op. That also makes re-runs safe.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # manual re-run, no empty commit needed
+
+permissions:
+  contents: write # required to push the tag and create the release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need full history + existing tags
+
+      - name: Build
+        id: build
+        run: bash .github/scripts/build.sh
+
+      - name: Tag and publish, unless this version is already released
+        env:
+          GH_TOKEN: ${{ github.token }} # the gh CLI reads this
+        run: |
+          tag="v${{ steps.build.outputs.version }}"
+
+          if git rev-parse "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "$tag is already released — nothing to do."
+            exit 0
+          fi
+
+          git tag "$tag"
+          git push origin "$tag"
+
+          # --generate-notes builds the changelog from PR titles merged since
+          # the previous tag, which is why merging through PRs is worth the
+          # ceremony even as the only developer.
+          gh release create "$tag" \
+            --title "Bagnon ExtBank ${{ steps.build.outputs.version }}" \
+            --generate-notes \
+            "${{ steps.build.outputs.zip }}"

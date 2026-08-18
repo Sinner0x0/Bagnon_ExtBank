@@ -1,0 +1,6 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/">
+	<Script file="core\model.lua"/>
+	<Script file="core\nativeHooks.lua"/>
+	<Script file="core\cursor.lua"/>
+	<Script file="core\deposit.lua"/>
+</Ui>

@@ -1,0 +1,390 @@
+--[[
+	bagFrame.lua
+		The bag-slot strip (wraps at 5 columns, or more if the item grid
+		below us is currently drawn wider than that -- see GetColumnCount)
+		plus its purchase-next-slot button, centered above the grid. Shown/
+		hidden as a whole by the standard bag-toggle icon on the menu-button
+		line (see frame.lua) -- when hidden, nothing here is drawn at all;
+		when shown, every slot draws, occupied and empty alike.
+--]]
+
+local Bagnon = LibStub('AceAddon-3.0'):GetAddon('Bagnon')
+local ExtBank = Bagnon.ExtBank
+local BagFrame = Bagnon.Classy:New('Frame')
+Bagnon.ExtBankBagFrame = BagFrame
+
+local MIN_COLUMNS = 5 -- matches the item grid's own 4-column floor closely enough to not look mismatched at minimum width
+local SPACING = 2
+local PURCHASE_BUTTON_HEIGHT = 22
+local PURCHASE_BUTTON_WIDTH = 160
+local PURCHASE_BUTTON_GAP = 6
+
+-- Per-slot cost table and gold-icon escape string taken from ProjectEbonhold's
+-- own vault UI (modules/extBank/extBank.lua), so the price shown here is the
+-- same one the native window shows. Client-side only -- the server enforces and
+-- charges the real cost; this table is purely for telling the player what to
+-- expect before they confirm.
+local SLOT_COSTS = {50, 125, 250, 500, 1250, 2500, 5000, 10000}
+local GOLD_ICON = "|TInterface\\MoneyFrame\\UI-GoldIcon:14:14:2:0|t"
+
+local function NextSlotCost()
+	return SLOT_COSTS[math.min(ExtBank.unlockedBags + 1, #SLOT_COSTS)]
+end
+
+local function FormatGold(n)
+	local s = tostring(n):reverse():gsub('(%d%d%d)', '%1,'):reverse()
+	return (s:gsub('^,', ''))
+end
+
+-- Named on the class rather than kept file-local: components/frame.lua's
+-- OnHide hides this popup when the window closes (see its "Native close sync"
+-- section), and one shared constant is what keeps that call and the
+-- StaticPopup_Show below from drifting apart. Ours is a separate dialog from
+-- the native UI's own EXTBANK_UNLOCK_CONFIRM, so extBank.lua's ExtBank_Close
+-- hiding that one does nothing for this one.
+BagFrame.UNLOCK_POPUP = 'BAGNON_EXTBANK_UNLOCK_CONFIRM'
+
+StaticPopupDialogs[BagFrame.UNLOCK_POPUP] = {
+	text = 'Unlock bag slot %s for %s?',
+	button1 = YES,
+	button2 = NO,
+	OnAccept = function() Bagnon.ExtBank:Unlock() end,
+	timeout = 0,
+	whileDead = 1,
+	hideOnEscape = 1,
+}
+
+
+--[[ Constructor ]]--
+
+function BagFrame:New(frameID, parent)
+	local f = self:Bind(CreateFrame('Frame', nil, parent))
+	f:Hide()
+
+	f:SetScript('OnShow', f.OnShow)
+	f:SetScript('OnHide', f.OnHide)
+
+	f:SetFrameID(frameID)
+	f:CreateBagSlots()
+	f:CreatePurchaseButton()
+	f:UpdateEvents()
+
+	-- Deliberately does NOT show itself here, the same as core's own
+	-- BagFrame:New -- core's PlaceBagFrame (Bagnon/components/frame.lua)
+	-- Show()s or Hide()s us to match IsBagFrameShown() a few lines after this
+	-- returns, in the same layout pass. Showing from in here instead recurses
+	-- forever: OnShow sends BAG_FRAME_UPDATE_SHOWN, Ears dispatches it
+	-- synchronously, core's Frame handler calls Frame:Layout() (no
+	-- re-entrancy guard) -> PlaceBagFrame -> `GetBagFrame() or
+	-- CreateBagFrame()`, and GetBagFrame() is still nil because
+	-- Frame:CreateBagFrame only assigns self.bagFrame AFTER we return -- so it
+	-- builds another BagFrame, which shows itself, and so on. That was the
+	-- instant client freeze on opening the window.
+	return f
+end
+
+function BagFrame:CreateBagSlots()
+	local bags = {}
+	for i = 1, ExtBank.MAX_BAGS do
+		bags[i] = Bagnon.ExtBankBag:New(i - 1, self:GetFrameID(), self)
+	end
+	self.bags = bags
+end
+
+function BagFrame:CreatePurchaseButton()
+	local b = CreateFrame('Button', nil, self, 'UIPanelButtonTemplate')
+	-- Fixed size, not stretched to the strip's (now variable) width -- a
+	-- button stretched narrower than its own text wraps the label onto a
+	-- second line, which pushes its actual rendered height past whatever
+	-- SetHeight() says and the bag-slot grid below ends up drawn on top of
+	-- the overflow. Centering (see Layout, below) means it doesn't need to
+	-- span the full strip width to look intentional anyway.
+	b:SetHeight(PURCHASE_BUTTON_HEIGHT)
+	b:SetWidth(PURCHASE_BUTTON_WIDTH)
+	b:SetScript('OnClick', function()
+		-- Both conditions duplicate a state in which UpdatePurchaseButton has
+		-- already hidden this button, so neither is reachable by clicking it. Kept
+		-- for the same reason the MAX_BAGS one always was: what is on the other
+		-- side is a real charge against the player's gold, quoted from a count this
+		-- addon does not own.
+		if not ExtBank.hasModel then return end
+		if ExtBank.unlockedBags >= ExtBank.MAX_BAGS then return end
+		StaticPopup_Show(BagFrame.UNLOCK_POPUP,
+			tostring(ExtBank.unlockedBags + 1),
+			FormatGold(NextSlotCost()) .. ' ' .. GOLD_ICON)
+	end)
+	self.purchaseButton = b
+	return b
+end
+
+
+--[[ Messages ]]--
+-- Mirrors core Bagnon's own BagFrame exactly (components/bagFrame.lua):
+-- registered unconditionally (not gated to OnShow/OnHide like everything
+-- else in this addon) so this frame reacts to the toggle click even while
+-- WoW-hidden, and reacts directly instead of waiting for a full outer-frame
+-- relayout to notice -- nothing else would ever trigger one, since core's
+-- own Frame only relays out in response to BAG_FRAME_UPDATE_SHOWN (sent
+-- below), not the raw BAG_FRAME_SHOW/HIDE the toggle button fires.
+
+-- One handler for both: UpdateShown reads IsBagFrameShown() for itself, so
+-- which of the two messages arrived tells it nothing it doesn't already ask.
+function BagFrame:OnBagFrameToggled(msg, frameID)
+	if frameID == self:GetFrameID() then
+		self:UpdateShown()
+	end
+end
+
+function BagFrame:UpdateEvents()
+	self:UnregisterAllMessages()
+	self:RegisterMessage('BAG_FRAME_SHOW', 'OnBagFrameToggled')
+	self:RegisterMessage('BAG_FRAME_HIDE', 'OnBagFrameToggled')
+end
+
+
+--[[ Frame Events ]]--
+
+-- Lay ourselves out, then tell the outer Frame our footprint may have moved so
+-- it re-places the item grid below us (up into the gap, or back down) -- same
+-- nudge core's own BagFrame sends on every show/hide. The two go together
+-- everywhere they appear, which is why they're named once here rather than
+-- repeated at each of the three call sites.
+--
+-- Only on a real transition, though. BAG_FRAME_UPDATE_SHOWN drives a full
+-- outer-window Frame:Layout() (core's, which has no re-entrancy guard of its
+-- own), and that is by far the more expensive half of this -- pointless to send
+-- when Layout() has just established that nothing moved. Same shape as
+-- PageBar:Update (components/pageBar.lua), for the same reason.
+function BagFrame:Relayout()
+	if self:Layout() then
+		self:SendMessage('BAG_FRAME_UPDATE_SHOWN', self:GetFrameID())
+	end
+end
+
+function BagFrame:OnShow()
+	self:RegisterMessage('EXTBANK_MODEL_UPDATED', 'OnModelUpdated')
+	self:RegisterMessage('ITEM_FRAME_SIZE_CHANGE', 'OnItemFrameSizeChange')
+	self:UpdatePurchaseButton()
+	self:Relayout()
+end
+
+function BagFrame:OnHide()
+	self:UnregisterMessage('EXTBANK_MODEL_UPDATED')
+	self:UnregisterMessage('ITEM_FRAME_SIZE_CHANGE')
+
+	-- Layout()'s cache is only valid while we're shown, and dropping it here is
+	-- load-bearing rather than tidy. The nudge below tells the outer Frame to
+	-- reclaim our space; the matching OnShow has to make it give that space
+	-- back, and Relayout() is now gated on a transition -- so if (columns,
+	-- purchaseShown) happened to match what they were before the hide, OnShow
+	-- would lay nothing out and send nothing at all, leaving the strip drawn in
+	-- a window that never re-made room for it, down over the money row.
+	--
+	-- It covers the other direction too: from here on we're unregistered from
+	-- ITEM_FRAME_SIZE_CHANGE, so the grid below can settle on a different width
+	-- while we're hidden without us ever hearing about it.
+	self.laidOutColumns, self.laidOutPurchaseShown = nil, nil
+
+	self:SendMessage('BAG_FRAME_UPDATE_SHOWN', self:GetFrameID())
+end
+
+function BagFrame:OnModelUpdated()
+	-- Unlike a plain price/count text change, the purchase button's own
+	-- visibility can change here (see UpdatePurchaseButton -- it's hidden
+	-- outright, not just disabled, once every slot's unlocked), and that
+	-- changes how much vertical space the strip needs above its bag-slot grid
+	-- -- so this reaches for a real Layout() pass (reclaiming that space, or
+	-- making room for it again on a fresh model with fewer unlocked slots than
+	-- last session), plus the same BAG_FRAME_UPDATE_SHOWN nudge
+	-- OnShow/OnHide/OnItemFrameSizeChange already send so the outer Frame
+	-- catches up to our new size.
+	--
+	-- There are exactly two such cases and each fires at most once a session: the
+	-- first snapshot landing (hasModel false -> true, which un-hides the button),
+	-- and the last slot being bought (unlockedBags reaching MAX_BAGS, which hides
+	-- it for good). A cell delta cannot move this frame at all.
+	-- EXTBANK_MODEL_UPDATED arrives in bursts, so both calls below are guarded
+	-- internally and the burst costs a handful of compares; see Relayout and
+	-- UpdatePurchaseButton for which state each keys on.
+	self:UpdatePurchaseButton()
+	self:Relayout()
+end
+
+-- The item grid below us (see itemFrame.lua) only actually settles on its
+-- real width sometime after we've already drawn ourselves once -- its own
+-- Layout() is deferred/throttled and runs a frame later, and on the very
+-- first-ever open it doesn't exist yet at all when we first lay out (see
+-- GetColumnCount above). This is what lets our own width catch up once that
+-- happens, and on every later column-count/content change after.
+function BagFrame:OnItemFrameSizeChange(msg, frameID)
+	if frameID == self:GetFrameID() then
+		self:Relayout()
+	end
+end
+
+
+--[[ Update Methods ]]--
+
+function BagFrame:UpdateShown()
+	if self:IsBagFrameShown() then
+		self:Show()
+	else
+		self:Hide()
+	end
+end
+
+function BagFrame:IsBagFrameShown()
+	return self:GetSettings():IsBagFrameShown()
+end
+
+-- Hidden outright at MAX_BAGS, not merely disabled-and-relabeled -- a
+-- deliberate divergence from the native vault UI, which keeps the button in
+-- place and swaps its text to "All bag slots unlocked" instead (see the
+-- purchase-button branch in extBank.lua's own redraw). Nothing ever un-maxes
+-- bag slots, so that control is dead for good once it's reached; here it
+-- sits above a strip whose height Layout() (below) recomputes from scratch
+-- every pass, so hiding it hands the space back permanently rather than
+-- reserving a row forever for a button that can never do anything again.
+--
+-- Hidden on `not hasModel` for a different reason and with a different lifetime:
+-- until a snapshot has landed, unlockedBags is its declared default of 0, so
+-- NextSlotCost() returns SLOT_COSTS[1] and this button would offer "bag slot 1"
+-- at 50g -- a number with no basis, attached to a real CMSG_EXTBANK_UNLOCK the
+-- server prices from its own count. A player who owns 6 slots reads that as a
+-- bargain and is charged 5000. The native window has exactly this defect and no
+-- gate on it (extBank.lua's redraw keys on unlockedBags alone).
+--
+-- hasModel is the ONLY thing that separates "no data yet" from a genuinely
+-- zero-slot player, for whom 0 and "Purchase 50g" are both correct -- which is
+-- why the gate reads that flag rather than trying to find something suspicious
+-- about the count itself.
+--
+-- With main.lua's timeout now re-asking the server and then giving up without
+-- showing a window (rather than showing one anyway), ShowWindow is unreachable
+-- while hasModel is false, so this branch is a backstop rather than a live path
+-- -- said plainly here so the next reader does not go hunting for the trigger.
+-- It costs two compares and it is what keeps that property from depending on
+-- main.lua staying the way it is.
+function BagFrame:UpdatePurchaseButton()
+	-- Keyed on the two things the answer depends on, and nothing else. This runs on
+	-- every EXTBANK_MODEL_UPDATED, where unlockedBags changes only when a slot is
+	-- actually bought -- so unguarded, a burst spent a FormatGold (tostring ->
+	-- reverse -> gsub -> reverse, plus a second gsub) and a format per packet
+	-- to hand SetText a byte-identical string.
+	--
+	-- Deliberately NOT cleared in OnHide the way Layout()'s cache is: this
+	-- compares against live model state rather than against something we last
+	-- wrote, so it cannot go stale. unlockedBags genuinely can move while we're
+	-- hidden -- core/model.lua keeps parsing packets regardless of what this
+	-- frame is registered for -- and the comparison catches that by itself on
+	-- the next show.
+	--
+	-- hasModel is part of the key, not just of the branch below, and getting that
+	-- wrong is a real bug rather than a missed refresh: for a player who genuinely
+	-- owns no slots, unlockedBags is 0 both before and after their first snapshot.
+	-- Keyed on the count alone, the pre-model pass would cache 0 and hide the
+	-- button, the snapshot would arrive carrying the same 0, the early-out would
+	-- fire -- and the purchase button would stay hidden for the rest of the
+	-- session, for exactly the players who most need it. It flips false -> true
+	-- once per session and never back, so the extra compare is all it costs.
+	local unlocked = ExtBank.unlockedBags
+	local hasModel = ExtBank.hasModel
+	if self.shownUnlockedBags == unlocked and self.shownHasModel == hasModel then return end
+	self.shownUnlockedBags, self.shownHasModel = unlocked, hasModel
+
+	local b = self.purchaseButton
+	if not hasModel or unlocked >= ExtBank.MAX_BAGS then
+		b:Hide()
+	else
+		b:SetText(('Purchase %s %s'):format(FormatGold(NextSlotCost()), GOLD_ICON))
+		b:Enable()
+		b:Show()
+	end
+end
+
+
+--[[ Layout ]]--
+
+-- MIN_COLUMNS unless the item grid below us is currently rendering wider
+-- than that -- then widen to match it, so a player who's bumped up the item
+-- grid's column count (or just has a lot of bags equipped) doesn't end up
+-- with empty window width to the right of a strip stuck at its original
+-- size. Never narrower than MIN_COLUMNS, since the item grid can render
+-- narrower than its own column setting when there simply aren't enough
+-- items yet to fill a row.
+function BagFrame:GetColumnCount()
+	local itemFrame = self:GetParent() and self:GetParent():GetItemFrame()
+	local itemFrameWidth = itemFrame and itemFrame:GetWidth()
+
+	if itemFrameWidth and itemFrameWidth > 0 then
+		local span = Bagnon.ExtBankBag.SIZE + SPACING
+		local fitted = math.floor((itemFrameWidth + SPACING) / span)
+		return math.max(MIN_COLUMNS, fitted)
+	end
+
+	return MIN_COLUMNS
+end
+
+-- Every slot always draws when this frame's shown -- equipped ("present"),
+-- unlocked-but-empty, and locked alike -- since the frame's own Show/Hide
+-- (driven by the standard bag-toggle icon, see frame.lua) is what decides
+-- whether the strip is on screen at all. The purchase button sits above the
+-- grid (not below it) and stays horizontally centered regardless of how
+-- wide the grid currently is.
+--
+-- Everything written below is a pure function of (columns, purchaseShown):
+-- #self.bags is always MAX_BAGS and the button's own dimensions are constants,
+-- so between them those two decide all 70 anchors and both of this frame's
+-- dimensions, and nothing here reads any other input. That is what makes the
+-- early-out sound rather than merely cheap -- and it needs to be sound, because
+-- Relayout() runs on every EXTBANK_MODEL_UPDATED and those arrive in bursts,
+-- while a cell delta cannot move this frame at all. The common case was 70 x
+-- (ClearAllPoints + SetPoint) writing byte-identical anchors, and then a full
+-- outer-window relayout off the back of it.
+--
+-- Returns whether the footprint actually moved, which is all Relayout needs in
+-- order to decide whether to say so. Nothing else calls this.
+function BagFrame:Layout()
+	local columns = self:GetColumnCount()
+
+	-- Shown/hidden by UpdatePurchaseButton, not here -- this only reads its
+	-- current state, to decide whether to reserve room for it.
+	local purchaseShown = self.purchaseButton:IsShown()
+
+	if self.laidOutColumns == columns and self.laidOutPurchaseShown == purchaseShown then
+		return false
+	end
+	self.laidOutColumns, self.laidOutPurchaseShown = columns, purchaseShown
+
+	local size = Bagnon.ExtBankBag.SIZE
+	local button = self.purchaseButton
+	local topOffset = 0
+
+	if purchaseShown then
+		button:ClearAllPoints()
+		button:SetPoint('TOP', self, 'TOP', 0, 0)
+		topOffset = button:GetHeight() + PURCHASE_BUTTON_GAP
+	end
+
+	for i, bag in ipairs(self.bags) do
+		local col = (i - 1) % columns
+		local row = math.floor((i - 1) / columns)
+		bag:ClearAllPoints()
+		bag:SetPoint('TOPLEFT', self, 'TOPLEFT', col * (size + SPACING), -(topOffset + row * (size + SPACING)))
+	end
+
+	local rows = math.ceil(#self.bags / columns)
+	local gridWidth = columns * (size + SPACING) - SPACING
+	local stripHeight = rows * (size + SPACING) - SPACING
+
+	self:SetWidth(math.max(gridWidth, purchaseShown and button:GetWidth() or 0))
+	self:SetHeight(topOffset + stripHeight)
+	return true
+end
+
+
+--[[ Properties ]]--
+
+-- SetFrameID/GetFrameID/GetSettings come from Bagnon.ExtBankWidget
+-- (components/widget.lua).
+Bagnon.ExtBankWidget:Apply(BagFrame)
