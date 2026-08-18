@@ -88,10 +88,16 @@ done
 
 # Files that ship but are not referenced by the .toc. LICENSE is required by the
 # MIT terms; README.md is what a user reads after extracting; non-issues.md ships
-# because shipped source cites it by relative path -- four times, across
-# core/model.lua (x2), core/nativeHooks.lua and components/frameOptions.lua --
-# and a dead pointer makes those dispositions unverifiable for anyone reading the
-# source out of the zip.
+# because comments spread across most of the shipped Lua -- main.lua and both
+# subdirectories -- cite it by relative path, and a dead pointer makes those
+# dispositions unverifiable for anyone reading the source out of the zip.
+#
+# Deliberately not a count. This comment used to enumerate one ("four times,
+# across core/model.lua (x2), core/nativeHooks.lua and components/frameOptions.lua")
+# and had drifted to thirteen citations across eight files without anyone
+# noticing -- so the enumeration argued for dropping non-issues.md from a payload
+# that by then carried three times the pointers it named. For the live list:
+#   grep -rn 'non-issues\.md' --include='*.lua' .
 EXTRAS=("$TOC" LICENSE README.md docs/non-issues.md)
 
 # Whatever the shipped README embeds, so its images resolve offline from the

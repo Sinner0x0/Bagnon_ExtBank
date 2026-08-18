@@ -170,7 +170,8 @@ Run this once after cloning:
 git config core.hooksPath .githooks
 ```
 
-That switches on the hooks in [.githooks/](.githooks). They exist because the
+That switches on the hooks in `.githooks/`, which is in the git repository only —
+it is deliberately left out of the release zip. They exist because the
 version and date live in two places that must agree: `## Version:` / `## X-Date:`
 in `Bagnon_ExtBank.toc` (what addon managers list, and what the release
 workflow reads), and `ExtBank.VERSION` / `ExtBank.DATE` in `main.lua` (what the

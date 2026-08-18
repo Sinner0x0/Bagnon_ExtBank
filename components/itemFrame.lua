@@ -293,7 +293,8 @@ end
 -- cell, which is off-screen once you page away, so a pick abandoned mid-move is
 -- invisible again until you page back. That is the real half of the concern, and
 -- it is not worth paying for with the feature -- Frame:OnHide still clears on
--- every close path, so the state cannot outlive the window. See non-issues.md §13.
+-- every close path, so the state cannot outlive the window. See
+-- docs/non-issues.md §13.
 function ItemFrame:OnMouseWheel(delta)
 	if delta > 0 then
 		self:SetCurrentPage(self:GetCurrentPage() - 1)

@@ -16,10 +16,13 @@ Bagnon` guarantees it is loaded first, and every file opens with
 The repo root **is** the addon folder, and is often cloned directly into
 `Interface\AddOns\Bagnon_ExtBank`. `.githooks/` is dev-only and does not ship.
 Most of `docs/` **does** ship, so a zip install matches a clone: `non-issues.md`
-because shipped source cites it by relative path in four places, and `images/`
-because the shipped `README.md` embeds them. Dated review snapshots (`review-*.md`) do
-not — `build.sh` names `non-issues.md` explicitly and derives the images from the
-README's own `src=` refs, so nothing else in `docs/` is picked up by accident.
+because comments across most of the shipped Lua cite it by relative path, and
+`images/` because the shipped `README.md` embeds them. Don't restate that as a
+count here or in `build.sh` — the count it replaced was stale by a factor of
+three; `grep -rn 'non-issues\.md' --include='*.lua' .` is the live list. Dated
+review snapshots (`review-*.md`) do not — `build.sh` names `non-issues.md`
+explicitly and derives the images from the README's own `src=` refs, so nothing
+else in `docs/` is picked up by accident.
 
 ## Commands
 
