@@ -608,7 +608,9 @@ being spent completing a forgotten move, and the pick is cleared by the bag stri
 and short-lived even though it is not on the cursor. (The strip's *drop* path
 deliberately does not clear it, and does not need to — §15. A *non-item* payload
 released over a cell does spend it, which is this entry's accepted cost reached by a
-drag rather than a click — §16.)
+drag rather than a click — §16. The highlight is also what makes a *failed* in-vault
+move safe to spend the pick on, rather than something the player has to be told about
+in words — §18.)
 
 **Not cleared by paging, and that is deliberate.** The page bar and the mouse wheel
 briefly did clear it, on the reasoning that a re-flowed grid would let the pick
@@ -881,3 +883,78 @@ remains the drop target for a carried bag, which is what the tooltip has always 
 client's cancel is conditional in some way not seen here.
 
 *Investigated in-game 2026-08-18.*
+
+---
+
+## 18. `MoveWithinVault`'s return is discarded after the pick is spent
+
+**Where:** [`components/item.lua`](../components/item.lua) — `ItemSlot:DropCarriedItem`,
+the `elseif ExtBank.pickSrc` branch.
+
+**What gets flagged.** The 2026-08-17 review's §15. `ExtBank:Move` returns whether the
+request actually went out, and [`main.lua`](../main.lua) says above that group of
+wrappers that *"callers are expected to check"*. Every other mutating site does — the
+cursor branch in this same function, `Bag:OnClick`'s equip, `core/deposit.lua`. The
+in-vault move does not: it calls `MoveWithinVault(...)` bare and returns `true`, and
+`ExtBank:ClearPick()` has already spent the pick further up the branch. So when the
+DLL's `_G.ExtBankMove` is not callable — §10, the DLL owns that global and re-registers
+it on every packet, so this is not the addon's to predict — `ReportNoClient` prints,
+nothing moves, and the pick is gone. The review's contrast is with the cursor branch
+just above, which on the identical failure deliberately leaves the item on the cursor
+so the player can drop it again.
+
+**Why it stays: the loss is not silent.** The origin cell's highlight
+(`ItemSlot:UpdatePicked`, driven by `EXTBANK_PICK_CHANGED` — §13) clears the moment
+`ClearPick()` runs. The player is told the same thing in two channels at once: a red
+*"the ProjectEbonhold client is not responding -- nothing was moved"*, and a grid with
+nothing selected. Both halves of the state are on screen and they agree with each
+other. The cost is one click to reselect. Nothing is lost, nothing moved, and nothing
+is left ambiguous about which of those is true.
+
+**The contract exists to stop a different failure.** The regression `main.lua` names is
+state discarded *as though the call had succeeded, with no message at all* —
+`ClearCursor()` dropping a real item back into the bag on a deposit that never went
+out. That failure was mute and looked like success, which is what made checking the
+return mandatory. This one announces itself and looks like exactly what it is. The
+check is still the right default everywhere it is written; this branch is the case
+where its purpose is already served.
+
+**The asymmetry with the cursor branch is the point, not an oversight.** A carried item
+is an object that has to be somewhere: releasing it is a real state change, and holding
+onto it costs nothing. A pick is a selection, not an object — spending it changes one
+highlight, and the player watched it go out.
+
+**Why the obvious fix is the riskier option.** Re-arming the pick on a `false` return
+leaves an armed pick sitting behind a message that says *nothing was moved*. The comment
+above the `ClearPick()` call spells out that hazard and spends the pick up front on
+purpose: the player reads a failure as "that didn't happen", stops thinking about the
+gesture, and the next click on any cell completes the old move instead of picking up
+what was clicked. The highlight makes that less likely than it was before §13 — but a
+player who has just been told nothing happened has no particular reason to look at the
+grid. Every other way out of this branch ends the gesture: an occupied destination, a
+drop back on the origin. Making the no-client path the one exception that stays quietly
+armed buys back one click and reintroduces the failure mode the branch is ordered to
+avoid.
+
+**Not in tension with §13 and §15**, though it can read that way at a glance. Those two
+argue a pick should survive events that are *not about it* — a page step, a bag equipped
+on the strip. This one is about the pick's own gesture reaching its end. A pick outlives
+everything except its own conclusion, and a failed move concludes it.
+
+**Note for the next reader, and probably why this gets re-raised.** The older comments
+at the top of [`core/cursor.lua`](../core/cursor.lua) and above the `ClearPick()` call
+in the pick branch still say a pick has *"no visual cue at all"*. That predates the
+highlight; the comment immediately above `SetPick` records the correction, in the same
+file. Read from the stale halves alone, spending the pick really does look like silent
+state loss, and this entry looks wrong.
+
+**Reopen if:** a player reports a vault move they had to restart without understanding
+why — that would mean the highlight clear is not doing the work claimed here; or the
+pick ever grows state beyond `{ bagIndex, slot }` that costs more than one click to
+rebuild. Naming the pick in `ReportNoClient`'s wording is *not* the answer: that message
+is shared by every native wrapper (`Unlock`, `Move`, and everything routed through it),
+and most of its callers have no pick. A message on the branch itself would be, if the
+reopen condition ever lands.
+
+*Dispositioned from source 2026-08-18. The highlight this rests on is the one §13
+already records as shipped — no new in-game claim is made here.*
