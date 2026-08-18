@@ -211,6 +211,13 @@ function ItemFrame:OnShow()
 	self:UpdateEverything()
 end
 
+-- Every message this frame answers is therefore missed for as long as the window
+-- is closed, and the addon-wide ones -- TEXT_SEARCH_UPDATE above especially --
+-- keep changing while it is. Nothing re-plays them on the way back in, so
+-- anything a handler here paints has to be re-derived on show rather than assumed
+-- to have survived: ItemSlot:OnShow (components/item.lua) is where the search
+-- fade does that, and its comment records what closing over a live search used to
+-- leave behind.
 function ItemFrame:OnHide()
 	self:UnregisterAllMessages()
 end

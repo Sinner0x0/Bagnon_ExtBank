@@ -132,8 +132,50 @@ end
 
 --[[ Frame Events ]]--
 
+-- Both calls after Update() are deliberately outside its cache, for the same
+-- reason stated two different ways: the cache keys on resolved ITEM state, and
+-- neither the search fade nor the pick cue is item state.
+--
+-- The fade needs re-deriving here specifically because its input -- the
+-- addon-wide search string -- can change while this window is closed, and the
+-- only thing that would otherwise notice is ItemFrame:TEXT_SEARCH_UPDATE, a
+-- subscription ItemFrame:OnHide tears down. Both directions were reproduced
+-- in-game and neither repairs itself:
+--
+--   * Search active, close the vault, clear the search from the bags window,
+--     reopen -- a permanently greyed-out vault with no search anywhere in the
+--     UI. The clear broadcast to a grid that was not listening, and every cell
+--     whose item had not also changed in the meantime hit Update's early-out on
+--     the way back in, keeping the alpha it wore when the window closed.
+--   * The mirror: a search that is live at reopen filters every other Bagnon
+--     window and does nothing in this one until a page change happens to rebuild
+--     the cells. Reopening alone is enough to reach it, with no second window
+--     involved: closing hides core's SearchFrame, whose OnHide clears the search,
+--     and reopening runs its OnShow, which re-applies the last one
+--     (Bagnon/components/searchFrame.lua). Observed in-game, that re-broadcast
+--     lands BEFORE ItemFrame:OnShow has re-registered for it -- consistent with
+--     core's Frame:Layout building the search frame ahead of the item frame.
+--
+-- Reading the setting here rather than trusting the last broadcast is what keeps
+-- that from being a race worth reasoning about: whatever order the sibling
+-- widgets show in, the fade is derived from the live setting at the last moment
+-- this button becomes visible.
+--
+-- Pooling rides on the same call. Free() does not reset alpha, so a Restore()d
+-- button rebound to a cell that resolves identically to the one it last painted
+-- would carry the previous binding's fade across the rebind -- Update correctly
+-- skips a redraw it does not need, and the fade is not part of what it redraws.
+-- ItemSlot:New guarantees a real hidden->shown transition for exactly this kind
+-- of re-sync, so every rebind passes through here.
+--
+-- On a cold open with a search live this can re-run a cell's match immediately
+-- after Update already did (a cache miss calls UpdateSearch itself). That is
+-- once per window open, against the alternative of paying for it on every cell
+-- of every EXTBANK_MODEL_UPDATED, which is what moving UpdateSearch out from
+-- behind the early-out would cost.
 function ItemSlot:OnShow()
 	self:Update()
+	self:UpdateSearch()
 	self:UpdatePicked()
 end
 
@@ -470,20 +512,28 @@ local UNKNOWN_ITEM_TEXTURE = [[Interface\Icons\INV_Misc_QuestionMark]]
 -- function of them and not of the icon: two different items can share an icon, and
 -- an in-place enchant change would not move it.
 --
--- UpdateSearch is inside the guard too. Its other input is the search string,
--- which has its own message (TEXT_SEARCH_UPDATE) calling UpdateSearch directly and
--- bypassing this cache -- and when late item data does arrive, the texture change
--- lands us here anyway, so the search filter re-evaluates with it.
+-- UpdateSearch is called from inside the guard too, but it is NOT owned by it, and
+-- that distinction is load-bearing: its other input is the search string, which is
+-- not one of the five keys. Calling it here covers the case where late item data
+-- arrives and the texture change re-evaluates the filter along with it. The two
+-- drivers that do not go through this cache at all are TEXT_SEARCH_UPDATE
+-- (components/itemFrame.lua, while this window is open and listening) and
+-- ItemSlot:OnShow -- see the comment there for the close-and-reopen gap that the
+-- message alone left open, and for why the fade has to be re-derived on a show
+-- rather than inherited.
 --
 -- Pooling needs no invalidation hook, which is worth stating because the opposite
 -- looks obviously necessary. These five fields are only ever assigned immediately
 -- before the two writes below, and those two lines are the only thing in the addon
--- that paints an item button (the template's own OnEvent/OnUpdate are nil'd in
--- Create). So the cache describes THIS BUTTON'S PIXELS, not the cell it is bound
--- to, and Free/Restore/SetSlot repaint nothing -- a rebound button either resolves
--- to something different (a miss, so it is redrawn) or to exactly what it is
--- already showing (a skip, which is correct). Clearing the cache in SetSlot would
--- be defending against nothing.
+-- that paints an item button's ICON AND COUNT (the template's own OnEvent/OnUpdate
+-- are nil'd in Create). So the cache describes THIS BUTTON'S PIXELS, not the cell it
+-- is bound to, and Free/Restore/SetSlot repaint nothing -- a rebound button either
+-- resolves to something different (a miss, so it is redrawn) or to exactly what it
+-- is already showing (a skip, which is correct). Clearing the cache in SetSlot would
+-- be defending against nothing. UpdateSearch's SetAlpha is a third write that paints
+-- the button, and it is deliberately outside all of this: it is re-derived on every
+-- show instead of being cached, which is what makes the skip above safe for a
+-- rebound button rather than merely cheap. See docs/non-issues.md §12.
 function ItemSlot:Update()
 	if not self:IsVisible() then return end
 
@@ -527,7 +577,7 @@ end
 -- Dims (rather than hides) cells that don't match the addon-wide text
 -- search, same as core Bagnon/Bagnon_GuildBank's own item slots.
 -- `search` is passed in by ItemFrame:TEXT_SEARCH_UPDATE, which reads it once for
--- the whole grid; omitted (the Update() path) it's looked up here.
+-- the whole grid; omitted (the Update() and OnShow paths) it's looked up here.
 --
 -- `matches` is that same caller's per-pass itemId -> boolean memo (see its comment
 -- for why it must not outlive one pass). Optional: the Update() path passes none

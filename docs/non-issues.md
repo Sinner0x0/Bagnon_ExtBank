@@ -549,12 +549,23 @@ in fact written that way first, then removed.
 
 **Why it stays.** The cache is only ever assigned immediately before the two writes
 it guards, and those two lines are **the only thing in the addon that paints an item
-button** — the template's own `OnEvent`/`OnUpdate` are nil'd in `Create`, and nothing
-else calls `SetItemButtonTexture`/`SetItemButtonCount`. So the cache describes *this
-button's pixels*, not the cell it happens to be bound to, and `Free`/`Restore`/
-`SetSlot` repaint nothing. A rebound button therefore either resolves to something
-different — a miss, and it is redrawn — or to exactly what it is already showing, in
-which case skipping the write is correct.
+button's icon and count** — the template's own `OnEvent`/`OnUpdate` are nil'd in
+`Create`, and nothing else calls `SetItemButtonTexture`/`SetItemButtonCount`. So the
+cache describes *this button's pixels*, not the cell it happens to be bound to, and
+`Free`/`Restore`/`SetSlot` repaint nothing. A rebound button therefore either resolves
+to something different — a miss, and it is redrawn — or to exactly what it is already
+showing, in which case skipping the write is correct.
+
+**Scope.** "Icon and count" is the whole of that premise, and it is narrower than it
+first reads: `UpdateSearch`'s `SetAlpha` is a third write that paints the button, and
+its input — the addon-wide search string — is not in the cache key. That is deliberate
+and needs no invalidation here either, but for the opposite reason: the fade is
+re-derived from `Bagnon.Settings:GetTextSearch()` on **every show**, in
+`ItemSlot:OnShow`, so a `Restore()`d button never inherits the previous binding's
+alpha and a search changed while the window was closed is picked up on the way back
+in. Removing that call is what a stale fade would come from, not the missing
+`SetSlot` invalidation — closing this entry's argument over the fade would reach the
+wrong fix.
 
 Verified by mutation rather than by reading: deleting the invalidation changes no
 observable behaviour, because a rebind that *matters* always differs in at least one
