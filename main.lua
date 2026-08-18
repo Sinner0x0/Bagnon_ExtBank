@@ -204,8 +204,15 @@ end
 -- window shown" -- see IsVaultSessionOpen below.
 local nativeSessionOpen = false
 
--- The session's first-snapshot wait: whether one is running, its timeout handle,
+-- The session's first-snapshot wait: whether one is running, its timer handle,
 -- and whether this open has already spent its one retry.
+--
+-- pendingShowTimer carries two meanings across that wait, never both at once:
+-- while waitingForModel is true it is the FIRST_SHOW_TIMEOUT handle, and once the
+-- snapshot has landed and cleared that flag it is the one-frame defer that
+-- OnModelReadyForFirstShow puts the show itself on. One handle rather than two so
+-- CancelPendingShow keeps a single cancel site and stays the whole answer to
+-- "nothing is going to show this window" -- which OnNativeClose leans on.
 local waitingForModel = false
 local pendingShowTimer = nil
 local retriedFirstSnapshot = false
@@ -320,25 +327,67 @@ function ExtBank:ShowWindowOnceModelReady()
 end
 
 -- Also called from OnNativeClose -- covers closing again before any
--- response ever arrived, so a snapshot that lands after the player already
--- left doesn't pop the window open on them unasked.
+-- response ever arrived, or a frame after one did but before the show it
+-- scheduled has run, so a snapshot that lands after the player already left
+-- doesn't pop the window open on them unasked.
 function ExtBank:CancelPendingShow()
 	if waitingForModel then
 		waitingForModel = false
 		Bagnon.Callbacks:Ignore(self, 'EXTBANK_MODEL_UPDATED')
 	end
 
-	-- Outside the flag's guard: the timer is what clears the flag on the timeout
-	-- path, so by the time OnFirstShowTimeout calls through here the flag is
-	-- already false while the handle still needs dropping.
+	-- Outside the flag's guard, and both of the handle's meanings need it there:
+	-- the timer is what clears the flag on the timeout path, so by the time
+	-- OnFirstShowTimeout calls through here the flag is already false while the
+	-- handle still needs dropping -- and the deferred show below is scheduled
+	-- with the flag deliberately already cleared, so a close landing inside that
+	-- one frame would leave it to fire otherwise.
 	if pendingShowTimer then
 		self:CancelTimer(pendingShowTimer)
 		pendingShowTimer = nil
 	end
 end
 
+-- Deferred by a frame rather than shown inline, and that is load-bearing.
+--
+-- We are running inside Ears:SendMessage's `for obj, action in pairs(listeners)`
+-- over the EXTBANK_MODEL_UPDATED listener table (Bagnon/utility/ears.lua), and
+-- ShowWindow builds the entire widget tree synchronously: ItemFrame, Bag and
+-- BagFrame each RegisterMessage('EXTBANK_MODEL_UPDATED') from their OnShow, which
+-- is `listeners[obj] = action` on the very table being walked. Lua 5.1's `next`
+-- permits clearing or overwriting EXISTING fields during a traversal but not
+-- adding new ones -- the outcome is `invalid key to 'next'` thrown out of
+-- ProjectEbonhold's packet handler, or, if the insert happens not to rehash,
+-- listeners silently skipped or visited twice.
+--
+-- It never fired, but by coincidence of ordering rather than by design: on that
+-- first packet this module is the SOLE listener, so CancelPendingShow's Ignore
+-- empties the table, Ears nils self.listeners[msg] on the way past, and the
+-- widgets' Listen allocates a fresh table instead of mutating the traversed one.
+-- Any second listener on that message -- another module, a later feature of ours
+-- -- makes `if not next(listeners)` false, keeps the table alive, and arms it.
+-- Do not "simplify" this back to a direct call.
+--
+-- Nothing is lost by the frame: each of those OnShow handlers registers AND
+-- re-derives from the model in the same call (UpdateEverything, Update, Relayout
+-- + UpdatePurchaseButton), so the widgets read the snapshot rather than needing
+-- to have received the message announcing it.
+--
+-- 0 is AceTimer's next tick -- it clamps anything under 0.01 up to 0.01 -- and it
+-- dispatches through xpcall, so a throw from anywhere in that widget tree reaches
+-- the error handler instead of escaping into the native's call stack.
 function ExtBank:OnModelReadyForFirstShow()
 	self:CancelPendingShow()
+	pendingShowTimer = self:ScheduleTimer('OnDeferredFirstShow', 0)
+end
+
+-- Drops the handle before showing rather than scheduling ShowWindow directly, so
+-- `pendingShowTimer ~= nil` keeps meaning "a show is still coming" for the whole
+-- of its life. AceTimer's CancelTimer on an already-fired handle is a silent
+-- false, so leaving it set would cost nothing at runtime and would still make
+-- CancelPendingShow's test read as true for the rest of the session.
+function ExtBank:OnDeferredFirstShow()
+	pendingShowTimer = nil
 	self:ShowWindow()
 end
 
