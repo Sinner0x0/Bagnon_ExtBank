@@ -527,9 +527,16 @@ tested — the empty-target result already answered the question that mattered f
 the decision above, so the contents case was never run. Do not read this entry as
 proof of that case.
 
+Also untested, and for the same reason: the probe carried a **bag**, which is what
+the explicit UI message is an answer to. What the server says when the carried item
+is not a container at all — the drop still sends `EquipBagToSlot`, and
+`ClearCursor()` still runs unconditionally — was not checked. If that one is mute,
+the "clear player-facing feedback" line above does not cover it.
+
 **Reopen if:** a swap or a lossy accept is ever observed against a bag-strip slot
-whose occupant has contents, or the round-trip UX becomes a real complaint rather
-than a theoretical one.
+whose occupant has contents, or a non-bag payload turns out to be refused
+silently, or the round-trip UX becomes a real complaint rather than a theoretical
+one.
 
 *Investigated in-game 2026-08-17.*
 
@@ -599,7 +606,9 @@ driven by `EXTBANK_PICK_CHANGED`), a right-click always means "withdraw" instead
 being spent completing a forgotten move, and the pick is cleared by the bag strip's
 *click* path as well as by the cell paths and `Frame:OnHide`. So the state is visible
 and short-lived even though it is not on the cursor. (The strip's *drop* path
-deliberately does not clear it, and does not need to — §15.)
+deliberately does not clear it, and does not need to — §15. A *non-item* payload
+released over a cell does spend it, which is this entry's accepted cost reached by a
+drag rather than a click — §16.)
 
 **Not cleared by paging, and that is deliberate.** The page bar and the mouse wheel
 briefly did clear it, on the reasoning that a re-flowed grid would let the pick
@@ -760,3 +769,115 @@ and the one-liner is right. A player report of a vault move they did not intend,
 traced to a pick armed before a bag equip, would do it too.
 
 *Investigated in game 2026-08-17, after that day's review raised it as a should-fix.*
+
+---
+
+## 16. A non-item drag released over the grid spends an outstanding pick
+
+**Where:** [`components/item.lua`](../components/item.lua) — `ItemSlot:OnReceiveDrag`,
+an unconditional `self:DropCarriedItem()`.
+
+**What gets flagged.** Blizzard fires `OnReceiveDrag` for **any** cursor payload —
+spell, macro, money, item — while `DropCarriedItem`'s first test is `CursorHasItem()`,
+false for all the non-item ones. So control falls straight into the
+`elseif ExtBank.pickSrc` branch and issues a real `MoveWithinVault`. Arm a pick on a
+vault cell, then drag a spell off the action bar and release it over the grid: the
+spell leaves the bar, and a vault item relocates on a gesture that had nothing to do
+with the vault. Raised as a should-fix by the 2026-08-17 review, remedy `GetCursorInfo()
+== nil` on the branch.
+
+**Why it stays: the gesture is the mistake, and the spend is the cost §13 already
+accepts.** Reaching this means arming a virtual pick and then abandoning it mid-move to
+go do something unrelated. That is the same shape §13 records as the accepted price of
+a pick that cannot be put on the cursor — *"a leftover pick silently hijacks the next
+click on any cell"*. The trigger here is a drag release rather than a click, but
+nothing that makes the cost tolerable turns on which event delivers it:
+
+- The origin cell has carried a highlight for the whole time the pick has been
+  outstanding (`ItemSlot:UpdatePicked`), so the state was on screen when the player
+  turned to the action bar.
+- The outcome stays inside the vault. The item lands in the cell the cursor was over —
+  nothing is withdrawn, destroyed or charged for, it is visible where it landed, and
+  the player puts it back with the same two clicks that moved it.
+- `Frame:OnHide` still bounds the pick to the life of the window.
+
+**The action-bar half is not ours.** Dragging an action off a bar and releasing it
+somewhere that does not take it is a Blizzard interaction with a Blizzard outcome; this
+addon neither causes it nor can decline it. What the addon owns is the pick — and the
+same misuse spends it either way, since a guarded handler only leaves it armed for the
+*next* click, which is the case §13 already covers.
+
+**Same call as §15, made for a different reason.** There the fix was declined because
+its rationale did not transfer and it would have deleted a working gesture. Here it is
+declined because the state it guards is reached only by walking away from a half-made
+move, and what it prevents is a reversible relocation inside the player's own vault.
+Neither is "the guard would be wrong" — both are "the guard buys less than it asserts".
+
+**If it is ever taken**, the shape is `GetCursorInfo() == nil` on the
+`elseif ExtBank.pickSrc` branch inside `DropCarriedItem`, **not** on `OnReceiveDrag`:
+the vault's own cell-to-cell drag deliberately puts nothing on the real cursor (see
+`ItemSlot:OnDragStop`), so it passes that test, while the deposit path above it still
+needs `CursorHasItem()` reachable. Note it changes the click path too — a left-click on
+a cell while a spell rides the cursor would stop completing the pick and arm a new one
+on the cell clicked instead.
+
+**Reopen if:** a player reports a vault move they did not make and it traces to a
+non-item payload rather than to a forgotten click, or the `pickSrc` branch gains an
+outcome that leaves the vault — a withdraw, a destroy, anything with a cost — rather
+than moving a cell within it. §13's *Reopen if* still covers the pick in general; this
+entry holds only the drag-release trigger.
+
+*Dispositioned 2026-08-17, after that day's review raised it as a should-fix.*
+
+---
+
+## 17. Right-click on a bag-slot strip button never fires while the cursor is loaded
+
+**Where:** [`components/bag.lua`](../components/bag.lua) — `Bag:OnClick`.
+
+**What gets flagged.** The 2026-08-17 review's §9 opened with this repro: pick an item
+up out of your bags so it rides the cursor, then right-click an equipped strip slot to
+unequip its bag. The old guard was
+
+```lua
+if not self:IsLocked() and not self:DropCarriedBag() then
+```
+
+and `DropCarriedBag` returns true on `CursorHasItem()` alone, so the whole body — the
+`button == 'RightButton'` test included — was short-circuited away. The review's
+reading was that `EquipBagToSlot` went out instead, the server refused it (§11), and
+the unequip silently never happened.
+
+**Investigated in-game, 2026-08-18.** The symptom is real and reproduces exactly as
+described: the cursor empties, the bag is not unequipped, and no error is shown. The
+*cause* is not this addon. **The client itself cancels a loaded cursor on
+right-button-down and consumes the press**, so `Bag:OnClick` never runs at all for
+that gesture. It was verified after the fix below, with the equip path no longer
+reachable from `RightButton` and no `ClearCursor()` anywhere on that branch: the
+cursor still empties and nothing else happens. Nothing this addon sends or swallows
+is involved, and no `EquipBagToSlot` was ever going out on that route.
+
+That is engine behavior on every frame in the UI, not something a strip button can
+override. This addon already bows to it elsewhere: `ItemSlot:OnClick`
+([`components/item.lua`](../components/item.lua)) guards its right-click withdraw on
+`not CursorHasItem()` for the same reason, which is why the cells never showed this
+shape.
+
+**What was really broken, and is fixed.** The bad guard was reachable — just not by
+right-click. The button is `RegisterForClicks('anyUp')`, so **MiddleButton, Button4
+and Button5** reached it: while carrying, they fired the bogus `EquipBagToSlot` plus
+`ClearCursor()`; with an empty cursor they fell into a bare `elseif self:IsEquipped()`
+and toggled the bag's contents out of the grid on a gesture that was never given a
+meaning. Both are closed by testing the button before the drop and naming it on every
+branch. Confirmed in-game: middle-click is now inert, and right-click with an empty
+cursor unequips.
+
+**So §9's first repro is not fixable and does not need to be.** Do not re-file "right-
+click while carrying should unequip" — the press does not reach Lua. Left-click
+remains the drop target for a carried bag, which is what the tooltip has always said.
+
+**Reopen if:** a right-click made while carrying is ever observed reaching
+`Bag:OnClick` (a `print` at the top of it is the whole test), which would mean the
+client's cancel is conditional in some way not seen here.
+
+*Investigated in-game 2026-08-18.*

@@ -363,6 +363,14 @@ function ItemSlot:OnDragStop()
 	target:DropCarriedItem()
 end
 
+-- Unconditional on purpose, and it stays that way. Blizzard fires this for ANY
+-- cursor payload -- spell, macro, money -- and DropCarriedItem's first test is
+-- CursorHasItem(), so a non-item drag released here falls into the pickSrc branch
+-- and completes an outstanding pick. See docs/non-issues.md §16: reaching that
+-- needs a pick armed and then abandoned to go do something else, the move stays
+-- inside the vault and is reversible, and guarding it only defers the same spend
+-- to the next click (§13). Do not add a GetCursorInfo() test here -- if it is ever
+-- wanted it belongs on the branch itself, one guard covering both routes.
 function ItemSlot:OnReceiveDrag()
 	self:DropCarriedItem()
 end

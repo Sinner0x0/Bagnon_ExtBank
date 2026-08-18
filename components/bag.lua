@@ -87,7 +87,8 @@ end
 
 -- Left-click: drop a carried bag to equip here, or (on an equipped slot)
 -- toggle its contents on/off in the shared grid. Right-click: unequip
--- (server enforces that the bag has to be empty first).
+-- (server enforces that the bag has to be empty first). Every other button
+-- does nothing -- see the note in the body.
 --
 -- CheckButtons on 'anyUp': the client flips the checked state before this
 -- runs, so every path has to reach the UpdateChecked() below or the slot is
@@ -102,13 +103,45 @@ function Bag:OnClick(button)
 	-- survive arbitrarily long.
 	ExtBank:ClearPick()
 
-	if not self:IsLocked() and not self:DropCarriedBag() then
-		if button == 'RightButton' then
-			if self:IsEquipped() then
-				ExtBank:UnequipBag(self.bagIndex)
+	-- The button is tested BEFORE the drop, and every branch names its button
+	-- explicitly. Both halves of that are load-bearing, and the shape this
+	-- replaced got both wrong:
+	--
+	--   if not self:IsLocked() and not self:DropCarriedBag() then
+	--
+	-- DropCarriedBag answers "was the cursor loaded?", not "did I handle this
+	-- click" -- it returns true on CursorHasItem() alone, whatever the button
+	-- was and whether the equip went out or GetVerifiedCursorSource refused it.
+	-- So ANY click made while carrying something short-circuited the entire body
+	-- away, the button test included, and was treated as a drop: what went out
+	-- was EquipBagToSlot for the carried item aimed at the clicked slot, with
+	-- ClearCursor() already run.
+	--
+	-- Right-click was the one exception, and only by accident -- see
+	-- docs/non-issues.md §17. The client cancels a loaded cursor on
+	-- right-button-down and consumes the press, so OnClick never ran for that
+	-- case at all and never can; the strip cannot override it, and
+	-- components/item.lua's ItemSlot:OnClick bows to the same rule (its
+	-- right-click withdraw is guarded on `not CursorHasItem()`). That left
+	-- MiddleButton and Button4/5 as the live route into the bogus equip.
+	--
+	-- The old second branch was a bare `elseif self:IsEquipped()`, and this
+	-- button is RegisterForClicks('anyUp') above -- so those same three buttons
+	-- also reached ToggleBagSlot with an empty cursor, making a bag's contents
+	-- disappear from the grid on a click that was never given a meaning.
+	-- components/item.lua's ItemSlot:OnClick closed exactly this on the cell
+	-- side; the strip was not brought along.
+	--
+	-- So RightButton here is reachable only with an empty cursor. Testing it
+	-- anyway rather than leaning on that: the guarantee is the client's, not
+	-- ours, and a bare `else` is what this branch is being fixed for.
+	if not self:IsLocked() then
+		if button == 'LeftButton' then
+			if not self:DropCarriedBag() and self:IsEquipped() then
+				self:GetSettings():ToggleBagSlot(self.bagIndex)
 			end
-		elseif self:IsEquipped() then
-			self:GetSettings():ToggleBagSlot(self.bagIndex)
+		elseif button == 'RightButton' and self:IsEquipped() then
+			ExtBank:UnequipBag(self.bagIndex)
 		end
 	end
 
@@ -125,6 +158,13 @@ end
 -- exact same exposure to them naming something other than what's being
 -- carried, which here would equip the wrong container into the strip. A
 -- refusal leaves the item on the cursor rather than dropping it.
+--
+-- The return means "the cursor was loaded, so this was a drop attempt" -- NOT
+-- "the equip succeeded", and not "I handled this click". A verification refusal
+-- still answers true, because the click was still spent on a drop the player
+-- made. Only OnClick's LeftButton branch and OnReceiveDrag may read it; reading
+-- it as a general "was this click consumed" test is what swallowed the
+-- right-click unequip, and OnClick's body says so at length.
 function Bag:DropCarriedBag()
 	if not CursorHasItem() then return false end
 

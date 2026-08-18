@@ -2,7 +2,7 @@
 ## Title: Bagnon ExtBank
 ## Author: Sinner0x0
 ## Version: 1.0.0
-## X-Date: 17-08-2026
+## X-Date: 18-08-2026
 ## X-License: MIT
 ## Notes: Folds ProjectEbonhold's ExtBank ("Void Storage") bag-slots into Bagnon
 ## RequiredDeps: Bagnon

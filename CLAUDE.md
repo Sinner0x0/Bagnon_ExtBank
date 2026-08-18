@@ -192,11 +192,17 @@ items to move:
   this deliberately puts *nothing* on the cursor and has no visual cue; a leftover
   pick silently hijacks the next click on any cell. It is cleared in `Frame:OnHide`.
 
-`Frame:OnHide` (`components/frame.lua`) is the single funnel every close path runs
-through — X button, Escape, native close. It clears the pick and any pending
-deposit, hides the purchase popup, and calls `ExtBank_Close()` unless
+`Frame:OnHide` (`components/frame.lua`) is the single funnel every close path of a
+*shown* window runs through — X button, Escape, native close. It clears the pick and
+any pending deposit, hides the purchase popup, and calls `ExtBank_Close()` unless
 `closingFromNative` is set. Put teardown there, not in `OnNativeClose`, which the X
 and Escape paths never reach.
+
+The one exception is `ClearPendingDeposit`, which deliberately runs in **both**.
+`Hide()` on a frame that was never shown runs no `OnHide` script, and deposits arm
+for the whole native session (`IsVaultSessionOpen`) — including the first-snapshot
+wait and the give-up after it, where the window never appears at all. Only
+`OnNativeClose` covers that gap; both copies carry the rationale.
 
 ### Grid, paging, and layout timing
 

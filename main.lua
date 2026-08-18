@@ -69,7 +69,7 @@ Bagnon.ExtBank = ExtBank
 -- .toc's version plus today's date, the pre-commit hook runs it, and CI
 -- re-checks it. See README's "Working on this addon".
 ExtBank.VERSION = '1.0.0'
-ExtBank.DATE    = '17-08-2026'
+ExtBank.DATE    = '18-08-2026'
 
 
 --[[ Addressing ]]--

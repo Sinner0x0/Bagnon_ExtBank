@@ -151,6 +151,16 @@ end
 -- at all. Nothing about a click made against the old window should still be
 -- waiting to act once that window is gone.
 --
+-- ClearPendingDeposit is the one of the three that is ALSO called from
+-- OnNativeClose, and that duplication is deliberate -- do not drop it there as
+-- redundant. "A native close hides this frame" only lands back here for a frame
+-- that was actually SHOWN; deposits arm for the whole native session
+-- (IsVaultSessionOpen), including the first-snapshot wait and the give-up after
+-- it, where the window has never been Show()n and Hide() on it runs no OnHide
+-- script at all. The pick and the popup need no such twin: both can only be
+-- created by clicking inside our own window, so neither can exist in that
+-- never-shown state. OnNativeClose documents its half.
+--
 -- The popup in particular outlives the window it was raised from unless it's
 -- hidden explicitly -- StaticPopups are parented to UIParent, not to us -- so
 -- an unanswered "Unlock bag slot N?" would sit on screen after the vault
