@@ -16,7 +16,9 @@ local SavedFrameSettings = Bagnon.SavedFrameSettings
 -- setting would hand back its default. That is not a cosmetic difference:
 -- GetBagsPerPage() feeds straight into math.ceil(total / n) in
 -- components/itemFrame.lua's GetPageCount, so a nil there throws on every
--- single model update and the window never opens again.
+-- single model update and the window never opens again. Nil is not the only
+-- value that arrives unvalidated for the same reason -- see ToBagCount beside
+-- the accessors at the bottom for the rest of them.
 local DEFAULT_BAGS_PER_PAGE   = 5
 local DEFAULT_BAG_FRAME_SHOWN = true
 
@@ -98,12 +100,45 @@ end
 -- wraps. See frameSettings.lua for the live layer that reads and writes
 -- them, and for why neither of these needs to be defined before it.
 
+-- Nothing but these two accessors touches GetDB().bagsPerPage, so this is the
+-- one place a bad value can be stopped -- and with no core default-filling
+-- behind them (the note on the defaults at the top of this file), nothing else
+-- validates it. Two sources feed the field: the options slider hands
+-- FrameSettings:SetBagsPerPage a raw Slider GetValue(), and SavedVariables is
+-- player-writable.
+--
+-- What makes a non-integer worse than it looks is that this answer is a LOOP
+-- BOUND, not just a count -- components/itemFrame.lua's GetCurrentPageBags does
+-- `for i = (page - 1) * perPage + 1, ...`, so 5.0000001 has page 2 start at
+-- all[6.0000001] and every index it walks is nil. Page 1 draws, every later page
+-- comes back empty while the page bar still counts them, and no Lua error is
+-- raised to point at it. GetPageCount and ClampCurrentPage stay well-behaved on
+-- the same input, so nothing downstream catches it either.
+--
+-- Normalizing on READ as well as on write is what makes a value that is already
+-- in the saved file -- written by an earlier version, or typed in by hand --
+-- repair itself at load, with no migration step to run.
+local function ToBagCount(value)
+	local count = math.floor(tonumber(value) or DEFAULT_BAGS_PER_PAGE)
+
+	-- `not (count >= 1)` rather than `count < 1`: every comparison against NaN
+	-- is false, so this form sends a hand-edited 0/0 to the default as well.
+	if not (count >= 1) then
+		return DEFAULT_BAGS_PER_PAGE
+	end
+
+	-- Bounded above to keep the domain finite. MAX_BAGS bags on one page is
+	-- already all of them, and an unbounded inf passes the test above only to
+	-- reach 0 * inf = NaN in that same startIdx, which empties page 1 too.
+	return math.min(count, Bagnon.ExtBank.MAX_BAGS)
+end
+
 function SavedFrameSettings:SetBagsPerPage(count)
-	self:GetDB().bagsPerPage = count
+	self:GetDB().bagsPerPage = ToBagCount(count)
 end
 
 function SavedFrameSettings:GetBagsPerPage()
-	return self:GetDB().bagsPerPage or DEFAULT_BAGS_PER_PAGE
+	return ToBagCount(self:GetDB().bagsPerPage)
 end
 
 function SavedFrameSettings:SetBagFrameShown(shown)

@@ -43,11 +43,22 @@ local Bagnon = LibStub('AceAddon-3.0'):GetAddon('Bagnon')
 -- self:GetID(), so the count previously passed here landed in a third argument
 -- that ITEM_FRAME_BAGS_PER_PAGE_UPDATE's handler (components/itemFrame.lua)
 -- never reads -- it takes (msg, frameID) like every other handler in the addon.
+--
+-- Write first, then compare what the DB actually holds -- not `count` against
+-- the getter. savedFrameSettings.lua's accessors are what normalize the value
+-- (its ToBagCount, and the fractional-count hazard it exists for), so a raw
+-- argument and a normalized getter disagree on every value that normalizes to
+-- the count already saved: 5.4 would report a change against a stored 5, and
+-- again against 5.6. Only the effective value is worth a message -- the DB write
+-- is a field assignment, while the handler is a reset to page 1 plus a full
+-- UpdateEverything, up to 180 cells rebuilt.
 function Bagnon.FrameSettings:SetBagsPerPage(count)
 	if self:GetID() ~= Bagnon.ExtBank.FRAME_ID then return end
 
-	if self:GetBagsPerPage() ~= count then
-		self:GetDB():SetBagsPerPage(count)
+	local previous = self:GetBagsPerPage()
+	self:GetDB():SetBagsPerPage(count)
+
+	if self:GetBagsPerPage() ~= previous then
 		self:SendMessage('ITEM_FRAME_BAGS_PER_PAGE_UPDATE')
 	end
 end
