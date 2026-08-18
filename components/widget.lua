@@ -189,11 +189,18 @@ poller:SetScript('OnUpdate', function(self, elapsed)
 	-- well as IsOwned for the same reason RefreshTooltipIfOwned checks both;
 	-- MouseIsOver on top of those because ownership only records the last
 	-- OnEnter, and the one thing this poll serves is a hover that is still
-	-- physically in progress. IsVisible runs first: MouseIsOver reads the
-	-- rect, which a freed button no longer has.
+	-- physically in progress. Both rect guards run before MouseIsOver, which
+	-- reads GetTop/GetBottom/GetLeft/GetRight completely unguarded, and a
+	-- pooled button can be missing that rect two different ways: IsVisible
+	-- covers the freed one, GetLeft() the RESTORED one. Free() ClearAllPoints()
+	-- it (components/item.lua) and Restore() hands it back Shown but still
+	-- unanchored, because RequestLayout defers the SetPoint to the next
+	-- OnUpdate -- so visible-with-a-nil-rect is a reachable state, and this
+	-- OnUpdate and the layout one have no defined relative order to lean on.
+	-- The same test AnchorTooltip above makes, for the same reason.
 	local widget = self.widget
 	if not (GameTooltip:IsOwned(widget) and GameTooltip:IsShown()
-		and widget:IsVisible() and MouseIsOver(widget)) then
+		and widget:IsVisible() and widget:GetLeft() and MouseIsOver(widget)) then
 		self.widget = nil
 		self:Hide()
 		return
