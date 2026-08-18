@@ -128,6 +128,53 @@ function ExtBank:HookNativeGlobals()
 
 	hooked = true
 
+	-- Clear the DLL's native-bank deposit suppression, once, at the one moment in
+	-- the session when the vault provably cannot be open.
+	--
+	-- ebonhold.dll's g_extBankActive (extbank_client.h:133) makes NetClient::Send
+	-- drop CMSG_AUTOSTORE_BANK_ITEM / CMSG_AUTOBANK_ITEM sent from a live-inventory
+	-- position (:147-156) -- that is what stops a right-click deposit landing in the
+	-- real bank while the vault owns the gesture. Drags (CMSG_SWAP_ITEM) and
+	-- native-bank withdrawals pass through untouched by design (:138-141), so a
+	-- right-click deposit is the only gesture that shows any of this. The flag is
+	-- set by ExtBankOpen and cleared ONLY by extBank.lua's ExtBank_Close, whose last
+	-- line is ExtBankSetActive(0) (extBank.lua:648).
+	--
+	-- It is process memory, so a /reload does not touch it -- confirmed in client,
+	-- 2026-08-18. OnHide scripts do not run on a reload, so nothing calls
+	-- ExtBank_Close, and the flag is stranded on with no vault to deposit into:
+	-- every right-click deposit into the real bank is swallowed on the wire, the
+	-- item keeps the client's optimistic lock and greys, and core/deposit.lua's
+	-- stuck-item warning cannot explain it because HookInventoryDepositWatch gates
+	-- on IsVaultSessionOpen(), which the reload reset to false. Another /reload does
+	-- not fix it. See docs/review-2026-08-17.md §18.
+	--
+	-- Reachable because ExtBankOpen arms the flag BEFORE it sends the packet
+	-- (extbank_client.h:214-216), so /voidstorage away from a banker arms it even
+	-- though the server never answers -- and away from a banker there is no
+	-- BANKFRAME_CLOSED to run extBank.lua's own ExtBank_Close (:694-697). At a
+	-- banker that handler self-heals the reload; away from one, only
+	-- GiveUpOnFirstShow does, ~6s later (FIRST_SHOW_TIMEOUT spent twice, main.lua),
+	-- and a /reload inside that window strands it. With the native UI instead of
+	-- ours there is no give-up at all and the flag stays armed indefinitely.
+	--
+	-- Safe unconditionally, on both halves. We are at PLAYER_LOGIN or the first
+	-- PLAYER_ENTERING_WORLD with a lua_State that has only just started, so no vault
+	-- is open and no session is in flight. And ExtBankSetActive ships in the same
+	-- registration table as ExtBankOpen (dllmain.cpp:395-398), so the type() guard
+	-- failing means ExtBankOpen was absent too and the flag was never set.
+	--
+	-- ExtBankSetActive(0) rather than ExtBank_Close(): the flag is the whole point.
+	-- ExtBank_Close would also run RestoreBankPanel and friends for a close that
+	-- never had a matching open.
+	--
+	-- This is ProjectEbonhold's defect -- it happens with this addon uninstalled --
+	-- taken on here because HookNativeGlobals is the only code either side runs at a
+	-- moment when the answer is provably "off".
+	if type(_G.ExtBankSetActive) == 'function' then
+		_G.ExtBankSetActive(0)
+	end
+
 	-- Nothing left to retry for -- drop both registrations so a zone change stops
 	-- calling back in here for the rest of the session.
 	ExtBank:UnregisterEvent('PLAYER_LOGIN')

@@ -129,9 +129,20 @@ end
 -- non-Bagnon means" case it exists to catch -- so hooking it here, rather
 -- than the close button specifically, covers Escape as well as the X. A
 -- /reload is NOT one of those paths -- OnHide scripts do not run on a UI
--- reload -- and needs no covering: the reload restarts the Lua VM, so
--- extBank.lua is re-read from scratch and its isOpen upvalue starts false
--- again on its own. Don't rely on OnHide firing at reload time.
+-- reload. The LUA half of a close needs no covering there: the reload
+-- restarts the Lua VM, so extBank.lua is re-read from scratch and its isOpen
+-- upvalue starts false again on its own. Don't rely on OnHide firing at
+-- reload time.
+--
+-- The DLL half is NOT covered here, and reading the paragraph above as "a
+-- reload needs no cleanup at all" is what left it open. ExtBank_Close also
+-- runs ExtBankSetActive(0), which clears ebonhold.dll's g_extBankActive --
+-- process memory, not Lua, so a lua_State swap leaves it exactly as it was
+-- (confirmed in client, 2026-08-18). A reload with it armed strands
+-- native-bank deposit suppression with no vault to deposit into: right-click
+-- deposits into the real bank are dropped on the wire and the item sticks
+-- greyed. HookNativeGlobals (core/nativeHooks.lua) clears it at login for
+-- that reason; see docs/review-2026-08-17.md §18.
 --
 -- ExtBank_Close() is safe to call unconditionally: extBank.lua's own
 -- version no-ops gracefully on an already-closed vault (see its own
