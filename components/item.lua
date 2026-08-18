@@ -638,6 +638,56 @@ function ItemSlot:GetSearchLink()
 	return self.searchLink
 end
 
+-- Repaints the tooltip's own "+0 Stat" rows in place, for the random-suffix
+-- case RefreshTooltip documents below. An AddLine cannot say this where it
+-- needs saying: other addons hook OnTooltipSetItem, which the client fires
+-- from inside SetHyperlink, so their rows (GearScore, auction prices,
+-- disenchant values) are already appended by the time we get control -- ours
+-- lands under all of them, several lines away from the numbers it is about.
+-- GameTooltip has no insert, only append, so the rows themselves are the only
+-- place left that is adjacent to the problem.
+--
+-- Matched on a leading '+0 ' rather than on a stat name list: the client only
+-- emits a zero-valued bonus row when an enchantment computed to zero, which
+-- for a vault cell is exactly this bug and nothing else. A real item's zero
+-- stats are omitted, not printed.
+--
+-- The '*' pairs each rewritten row with the note RefreshTooltip appends, the
+-- way a footnote marker does. By the time that note lands it sits several rows
+-- below, past whatever the other addons added, so without a marker there is
+-- nothing tying the two together. It costs one character of width over the
+-- '+0' it replaces, which cannot widen an item tooltip in practice -- a bonus
+-- row is never the widest line on one -- and RefreshTooltip's own Show() would
+-- re-fit it if it ever were.
+--
+-- The rows arrive colour-coded rather than bare -- the client emits
+-- '|cffffffff+0 Intellect|r', confirmed by dumping GetText off a live tooltip
+-- (2026-08-18) -- so an anchored match has to see past the escape. They are
+-- stripped rather than matched around, because an embedded |c escape BEATS
+-- SetTextColor on a font string: leaving the original in place would hold the
+-- row white however the font string was coloured. Hence the colour goes back
+-- in as an escape of our own and SetTextColor is not used at all.
+--
+-- The edits are per-line font strings, undone wholesale by the next SetOwner,
+-- which is the reset every OnEnter already runs.
+local ZEROED_BONUS = '^%+0 '
+local UNKNOWN_BONUS_COLOR = '|cffff5555'
+local function MarkZeroedSuffixLines()
+	for i = 1, GameTooltip:NumLines() do
+		local line = _G['GameTooltipTextLeft' .. i]
+		local text = line and line:GetText()
+		if text then
+			local plain = text:gsub('|c%x%x%x%x%x%x%x%x', '')
+			plain = plain:gsub('|r', '')
+
+			if plain:match(ZEROED_BONUS) then
+				line:SetText(UNKNOWN_BONUS_COLOR
+					.. (plain:gsub(ZEROED_BONUS, '+?* ')) .. '|r')
+			end
+		end
+	end
+end
+
 -- Deliberately NOT named UpdateTooltip. Classy gives every instance a live
 -- metatable __index back to the class table (utility/classy.lua:
 -- `class.mt = {__index = class}`), so a method defined here under that exact
@@ -684,6 +734,36 @@ function ItemSlot:RefreshTooltip()
 
 	if data.count and data.count > 1 then
 		GameTooltip:AddLine('Stack: ' .. data.count, 0.7, 0.7, 0.7)
+	end
+
+	-- A negative randomProp is a random SUFFIX ("of the Eagle"), and the client
+	-- scales its bonus values by the link's 8th field -- the suffix factor. The
+	-- cell record has no such field (u8 bag, u8 slot, u32 itemId, u32 count,
+	-- u32 lowGuid, u32 enchant, i32 randomProp, u8 durability), so the link
+	-- above hardcodes 0 and every bonus renders as +0. Without this line the
+	-- cell reads as a strictly worse item than the identical one in the bags
+	-- -- a wrong item rather than a visibly incomplete one, which is the whole
+	-- reason it earns a warning colour instead of the grey the Stack line uses.
+	--
+	-- Confirmed in game 2026-08-18 against item 35976 (suffix -39): correct in
+	-- the player's bags, where the client builds the link itself and fills the
+	-- factor in as 72, and +0 here. ProjectEbonhold's own vault UI shows +0 for
+	-- it too, so this is the protocol's gap rather than one this addon opened.
+	--
+	-- Guarded on NEGATIVE only, and that is not a nicety. A positive randomProp
+	-- is a random PROPERTY, whose enchantments carry fixed values and need no
+	-- factor -- a real bag link for one carries 0 in field 8 exactly as we do
+	-- (verified against item 4566, randomProp 1012), so those tooltips are
+	-- already correct and marking them up would be a lie.
+	--
+	-- Survives the cold-cache path: SetTooltipItem's poller rebuilds through
+	-- RefreshTooltip (components/widget.lua), so both halves are re-applied
+	-- when a placeholder resolves rather than being lost at the moment they
+	-- matter.
+	if data.randomProp and data.randomProp < 0 then
+		MarkZeroedSuffixLines()
+		GameTooltip:AddLine('* Suffix bonuses not shown -- not reported by the vault',
+			1, 0.3, 0.3, true)
 	end
 
 	GameTooltip:Show()
