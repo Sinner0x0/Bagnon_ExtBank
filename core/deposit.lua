@@ -215,16 +215,6 @@ function ExtBank:HasPendingDeposits()
 	return live
 end
 
-function ExtBank:IsBagOnCurrentPage(bagIndex)
-	local itemFrame = self.window and self.window:GetItemFrame()
-	if not itemFrame then return false end
-
-	for _, b in itemFrame:GetVisibleBags() do
-		if b == bagIndex then return true end
-	end
-	return false
-end
-
 -- The slice of ExtBank.cells that GetVisibleBags (this frame's current page)
 -- actually covers, first cell with no item in it.
 --
@@ -327,6 +317,12 @@ function ExtBank:CorrectPendingDeposit(gained, arms)
 	-- we would otherwise decide "is this bag on the current page?" against a
 	-- page that no longer exists in that shape. Cheap to drop; UpdateEverything
 	-- drops them again a moment later anyway.
+	-- Which bags the current page is showing. Stays empty when there is no window or
+	-- no item grid yet, so every landed cell reads as off-page -- the same answer the
+	-- per-cell test this replaces gave in that state, and GetCurrentPageFreeSlot's
+	-- 'nowindow' (the silent branch) is what follows from it.
+	local onPage = {}
+
 	local itemFrame = self.window and self.window:GetItemFrame()
 	if itemFrame then
 		itemFrame:InvalidateVisibleBags()
@@ -346,6 +342,23 @@ function ExtBank:CorrectPendingDeposit(gained, arms)
 		-- (the broadcast at the end of this packet does it anyway) and re-entrant
 		-- from inside ParsePacket.
 		itemFrame:ClampCurrentPage()
+
+		-- Membership resolved once for the whole packet, and necessarily after both
+		-- calls above -- either can change which bags the page holds. The loop below
+		-- used to ask a helper per gained cell, which re-reached the window,
+		-- re-reached the item frame and re-walked the page list every time, in a loop
+		-- whose only early exit is `arms == 0` -- and that never fires when every cell
+		-- is on-page, which is the normal shape.
+		--
+		-- Safe to hold across the loop: nothing in it can move a bag on or off the
+		-- page. MoveWithinVault only sends, and the server's answer arrives as a later
+		-- packet rather than synchronously inside this one, so the page lists cached
+		-- above stay valid until ParsePacket's broadcast rebuilds them. Same pattern
+		-- ReloadAllItemSlots (components/itemFrame.lua) uses, whose own comment
+		-- explains why this answer is precomputed rather than asked per cell.
+		for _, bagIndex in itemFrame:GetVisibleBags() do
+			onPage[bagIndex] = true
+		end
 	end
 
 	-- Latched the first time the page turns out to have nowhere to put anything,
@@ -380,7 +393,7 @@ function ExtBank:CorrectPendingDeposit(gained, arms)
 		if arms == 0 then return end
 
 		local landed = gained[i]
-		if not self:IsBagOnCurrentPage(landed.bagIndex) then
+		if not onPage[landed.bagIndex] then
 			-- Spent here, BEFORE working out whether anything can be done about
 			-- it. A deposit we can't relocate has still been answered; leaving
 			-- its arm live would have the next packet retry a correction for an
@@ -525,12 +538,13 @@ function ExtBank:CheckDepositStuck(bag, slot, link, rechecked)
 	-- then. Once, not in a loop -- a player who parks an item on the cursor
 	-- and walks away shouldn't leave a timer rearming itself forever, and
 	-- unlike the deposit lock, "still carrying it" is a state they can see.
-	-- Verified, not read raw. cursorSrc is only written by the PickupContainerItem
-	-- hook, so it holds "where the last item picked up out of a container came
-	-- from", which core/cursor.lua spends fifty lines explaining is not the same as
-	-- "where the thing on the cursor now came from" -- ClearCursor leaves the
-	-- coordinates behind, and PickupInventoryItem loads the cursor without touching
-	-- them. Comparing them raw meant an unrelated carried item (a weapon dragged off
+	-- Verified, not read raw. cursorSrc is written by the pickup hooks and cleared by
+	-- ReleaseCursor, and nothing else -- so it holds "where the last item picked up
+	-- out of a container came from", which core/cursor.lua spends fifty lines
+	-- explaining is not the same as "where the thing on the cursor now came from": a
+	-- ClearCursor that did not come through ReleaseCursor leaves the coordinates
+	-- behind, and PickupInventoryItem loads the cursor without touching them.
+	-- Comparing them raw meant an unrelated carried item (a weapon dragged off
 	-- the character pane) whose stale coordinates happened to name this slot read as
 	-- "the player is just holding this one", suppressing the warning on the recheck
 	-- and leaving a genuinely stuck item unexplained for good. The link check is the

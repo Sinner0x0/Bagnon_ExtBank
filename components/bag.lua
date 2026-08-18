@@ -7,6 +7,7 @@
 
 local Bagnon = LibStub('AceAddon-3.0'):GetAddon('Bagnon')
 local ExtBank = Bagnon.ExtBank
+local Widget = Bagnon.ExtBankWidget
 local Bag = Bagnon.Classy:New('CheckButton')
 Bagnon.ExtBankBag = Bag
 
@@ -173,9 +174,10 @@ function Bag:DropCarriedBag()
 		-- Same rule as the content cells' own drop (components/item.lua): the cursor
 		-- is only released once the request has actually gone out, so a client that
 		-- is not answering leaves the bag in hand rather than silently dropping it
-		-- back as though it had been equipped.
-		ClearCursor()
-		ExtBank.cursorSrc = nil
+		-- back as though it had been equipped. And released through ReleaseCursor
+		-- (core/cursor.lua), which is what keeps the remembered coordinates from
+		-- outliving the item they name.
+		ExtBank:ReleaseCursor()
 	end
 	return true
 end
@@ -192,13 +194,6 @@ end
 --[[ Update Methods ]]--
 
 local EMPTY_BAG_TEXTURE = [[Interface\PaperDoll\UI-PaperDoll-Slot-Bag]]
-
--- Drawn when the client has no cached item data for the equipped container yet, the
--- same placeholder components/item.lua uses for content cells. See
--- docs/non-issues.md §5: this server does not answer bulk item queries, so it is a
--- real state that can resolve later or never -- hovering the slot is what asks for
--- the one id and repaints it (SetTooltipItem, components/widget.lua).
-local UNKNOWN_ITEM_TEXTURE = [[Interface\Icons\INV_Misc_QuestionMark]]
 
 function Bag:Update()
 	local locked = self:IsLocked()
@@ -218,10 +213,11 @@ function Bag:Update()
 	-- of the check too -- its text is a function of exactly these two values.
 	--
 	-- The RESOLVED texture is part of the key, not just (locked, itemId), and that
-	-- is what keeps the cache honest. GetItemIcon reads the client's item cache,
-	-- which on a cold login answers nil for an item it has not seen -- the button
-	-- draws the question mark, and seconds later the same itemId would answer with
-	-- the real path. Keyed on itemId alone the early-out swallowed that: the `?`
+	-- is what keeps the cache honest. Widget.ItemTexture reads the client's item
+	-- cache, which on a cold login has no answer for an item it has not seen -- the
+	-- button draws the question-mark placeholder, and seconds later the same itemId
+	-- would answer with the real path. Keyed on itemId alone the early-out
+	-- swallowed that: the `?`
 	-- was pinned for the rest of the session, un-fixable by toggling the strip
 	-- (OnHide does not clear this) or by reopening the window, only by /reload.
 	-- Meanwhile the content grid re-resolved on every packet and drew correctly, so
@@ -231,7 +227,7 @@ function Bag:Update()
 	if locked then
 		texture, desaturated = EMPTY_BAG_TEXTURE, true
 	else
-		texture = itemId and (GetItemIcon(itemId) or UNKNOWN_ITEM_TEXTURE) or EMPTY_BAG_TEXTURE
+		texture = itemId and Widget.ItemTexture(itemId) or EMPTY_BAG_TEXTURE
 		desaturated = false
 	end
 

@@ -97,6 +97,29 @@ function ExtBank:HookCursorTracking()
 	cursorHooked = true
 end
 
+-- Letting go of a real carried item: put it down, then forget where it came from.
+--
+-- The two statements have to travel together, and the field cannot be left to the
+-- hooks above to clear -- ClearCursor() is not PickupContainerItem and fires no hook
+-- of ours at all, so a bare ClearCursor() leaves the coordinates behind, still
+-- naming a slot the player is no longer carrying anything out of. That is precisely
+-- the stale memory the long note below exists to survive, and a drop path should not
+-- be creating it on its way out.
+--
+-- Which makes this and the hooks above the only writers of cursorSrc, the same
+-- property SetPick/ClearPick give pickSrc: "the carried item was recorded or
+-- released" is one observable event rather than an assignment copied into every drop
+-- path. Both paths that release a verified cursor call this -- the content cells'
+-- deposit (components/item.lua) and the bag strip's equip (components/bag.lua) --
+-- and neither touches the field itself.
+--
+-- No broadcast on the way out, unlike ClearPick: a real carried item is visible on
+-- the cursor, so nothing has to be repainted for the player to see it is gone.
+function ExtBank:ReleaseCursor()
+	ClearCursor()
+	self.cursorSrc = nil
+end
+
 -- Which containers the server accepts as a MOVE source: 0 = backpack,
 -- 1..4 = equipped bags. Confirmed by probing the live server rather than
 -- assumed from extBank.lua's own choice of the same range -- ExtBankMove sent
@@ -109,11 +132,12 @@ local function IsAcceptedSource(bag)
 	return bag >= 0 and bag <= 4
 end
 
--- cursorSrc is only ever WRITTEN by the hook above, so what it really holds is
--- "where the last item picked up OUT OF A CONTAINER came from" -- which is not
--- the same thing as "where the item on the cursor right now came from".
--- Nothing erases it when the cursor is emptied by another route (ClearCursor,
--- equipping, mailing, trading), and nothing corrects it when the cursor is
+-- cursorSrc is only ever WRITTEN by the two hooks above and by ReleaseCursor, so
+-- what it really holds is "where the last item picked up OUT OF A CONTAINER came
+-- from" -- which is not the same thing as "where the item on the cursor right now
+-- came from". Nothing erases it when the cursor is emptied by any route this file
+-- does not own (equipping, mailing, trading, a bare ClearCursor somewhere else in
+-- the UI), and nothing corrects it when the cursor is
 -- LOADED by another route -- PickupInventoryItem when you drag gear off the
 -- character pane, SplitContainerItem on a shift-drag, PickupMerchantItem at a
 -- vendor. Either way the remembered coordinates can end up naming a completely

@@ -230,22 +230,42 @@ end
 -- re-runs its own Layout() to catch up, so it's stuck sized for whatever we
 -- measured at (last session's size on a reopen, 0x0 with nothing cached
 -- yet), and cells drawn at our new size spill past its border and behind the
--- money frame. Core Bagnon's own itemFrame.lua wires this exact
--- OnSizeChanged->message bridge for the same reason; the outer Frame class
--- already listens for ITEM_FRAME_SIZE_CHANGE (it's core's, inherited
--- unchanged), it just never had anything telling it to fire for us.
--- Suppressed while ApplySize (below) is mid-write. WoW fires OnSizeChanged
--- synchronously from SetWidth, so a plain SetWidth-then-SetHeight pair sent
--- this message with the width already updated and the height still holding the
--- PREVIOUS pass's value -- and this message is not cheap to answer: it reaches
--- BagFrame:OnItemFrameSizeChange, which re-anchors all 70 strip buttons and
--- then sends BAG_FRAME_UPDATE_SHOWN, driving a full outer-window Frame:Layout()
--- through PlaceItemFrame. So every layout pass paid for two complete window
--- relayouts, the first of them sized from a half-written grid, and on a row
--- count change that intermediate one is briefly on screen.
+-- money frame. The outer Frame class already listens for ITEM_FRAME_SIZE_CHANGE
+-- (it's core's, inherited unchanged), it just never had anything telling it to
+-- fire for us.
+--
+-- ApplySize below is what sends that message, and is the only writer of this
+-- frame's size -- so this handler is a NET, not the live bridge, and its guard is
+-- true every single time it runs. Core Bagnon's own itemFrame.lua wires the plain
+-- OnSizeChanged->message version and so did we, until the bug in the paragraph
+-- below moved the send into ApplySize; what is left here is kept deliberately, as
+-- the one thing that would notice a size write arriving by some route other than
+-- ApplySize -- a two-anchor placement, a core change to PlaceItemFrame. That
+-- failure is silent (a window measured for a grid it no longer holds, no error
+-- anywhere), which is what the net is worth two table lookups per resize for.
+-- Do NOT read the always-taken early return as proof this is dead and delete
+-- ApplySize's SendMessage as its duplicate: that one is the live sender.
+--
+-- RequestLayout rather than the message directly, and that is the whole reason the
+-- flag exists. WoW fires OnSizeChanged synchronously from SetWidth, so a plain
+-- SetWidth-then-SetHeight pair sent this message with the width already updated and
+-- the height still holding the PREVIOUS pass's value -- and this message is not
+-- cheap to answer: it reaches BagFrame:OnItemFrameSizeChange, which re-anchors all
+-- 70 strip buttons and then sends BAG_FRAME_UPDATE_SHOWN, driving a full
+-- outer-window Frame:Layout() through PlaceItemFrame. So every layout pass paid for
+-- two complete window relayouts, the first of them sized from a half-written grid,
+-- and on a row count change that intermediate one is briefly on screen. Deferring
+-- to the next OnUpdate means both dimensions have landed before anything reacts,
+-- and Layout then re-derives the size this frame actually wants (see "Fixed grid
+-- width" below -- an outside size write is not something to honour) and leaves the
+-- single message to ApplySize. A net that brought the double relayout back with it
+-- would be a poor one.
+--
+-- Safe against its own dependency by construction: New creates throttledUpdater
+-- before it registers this script, so RequestLayout can never fire first.
 function ItemFrame:OnSizeChanged()
 	if self.applyingSize then return end
-	self:SendMessage('ITEM_FRAME_SIZE_CHANGE', self:GetFrameID())
+	self:RequestLayout()
 end
 
 -- delta is 1 for wheel-up, -1 for wheel-down -- same "up/back, down/forward"

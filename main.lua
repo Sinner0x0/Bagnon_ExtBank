@@ -116,7 +116,7 @@ function ExtBank:OnEnable()
 	-- same as how Bagnon_GuildBank builds its frame unconditionally in
 	-- OnEnable rather than waiting for the first open. The reference is kept
 	-- on the module because core/deposit.lua's GetCurrentPageFreeSlot and
-	-- IsBagOnCurrentPage need a way to reach the live item grid's current
+	-- CorrectPendingDeposit need a way to reach the live item grid's current
 	-- page from outside the widget hierarchy -- everywhere else that needs it
 	-- is itself a widget descended from this frame and just calls
 	-- self:GetParent() up the chain (see components/pageBar.lua), which isn't
@@ -504,9 +504,10 @@ end
 --
 -- They used to return nothing and swallow a missing native silently, which made
 -- this the one path in the addon that failed mute -- and the failure was worse
--- than mute. components/item.lua ran ClearCursor() and dropped cursorSrc on the
--- strength of the call having "worked", components/bag.lua did the same for a bag
--- equip, and core/deposit.lua spent an arm and claimed a destination cell. So the
+-- than mute. components/item.lua released the cursor (ExtBank:ReleaseCursor, see
+-- core/cursor.lua) on the strength of the call having "worked", components/bag.lua
+-- did the same for a bag equip, and core/deposit.lua spent an arm and claimed a
+-- destination cell. So the
 -- item snapped back into the bag with no message and no way to tell it from a
 -- server refusal, and the correction that would have retried was already gone.
 -- Everywhere else this addon explains a refusal (core/cursor.lua's three messages,

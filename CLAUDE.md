@@ -217,8 +217,12 @@ applies `Layout()` next frame. There is deliberately no flag alongside that
 `Show()` — it was a second copy of `throttledUpdater:IsShown()` and was removed;
 see the note at the updater in `components/itemFrame.lua`. `EXTBANK_MODEL_UPDATED`
 arrives in bursts, and re-anchoring every slot synchronously per message tore down
-the tooltip under the mouse. `ItemFrame:OnSizeChanged` → `ITEM_FRAME_SIZE_CHANGE`
-is what lets the outer frame catch up afterwards.
+the tooltip under the mouse. `ItemFrame:ApplySize` → `ITEM_FRAME_SIZE_CHANGE` is
+what lets the outer frame catch up afterwards — it writes both dimensions before
+sending the one message. `ItemFrame:OnSizeChanged` is **not** that bridge: it is a
+net for a size write arriving by any other route, it sends nothing itself, and its
+guard is true on every firing today. Don't delete `ApplySize`'s send as the
+duplicate of it.
 
 The grid's **width is pinned to the column count, not to content** — the bag strip
 derives its own column count from the grid's rendered width, so a content-derived

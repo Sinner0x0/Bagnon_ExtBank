@@ -28,54 +28,66 @@ Bagnon.ExtBankWidget = Widget
 -- this needs (no super_ calls, no overriding, no polymorphism) and depends on
 -- nothing unverified.
 --
+-- What gets copied is named by the two sub-tables below -- Widget.identity and
+-- Widget.tooltip -- never "everything on Widget". It used to be the latter, minus a
+-- three-name denylist (`name ~= 'Apply' and name ~= 'tooltip' and name ~=
+-- 'ApplyTooltip'`), which is a whitelist written inside out: anything added to this
+-- file that was not an identity method got silently stamped onto all five classes,
+-- one of which is the pooled ItemSlot. Not hypothetical -- ItemTexture at the bottom
+-- of this file is exactly such an addition, and under the denylist it would have
+-- landed on ItemFrame, BagFrame and PageBar as well.
+--
 -- rawget, not a plain `class[name] == nil`: a Classy class carries a live
 -- metatable, so a plain index would fall through to any inherited method and
 -- silently skip copying. rawget asks only about the class's own table, which is
 -- the question actually being asked -- "did this class define its own?".
 --
--- Call this at the END of a widget file, after the class has defined whatever
+-- Call these at the END of a widget file, after the class has defined whatever
 -- it means to keep for itself. Anything it defines wins; everything else comes
 -- from here.
-function Widget:Apply(class)
-	for name, method in pairs(Widget) do
-		if name ~= 'Apply' and name ~= 'tooltip' and name ~= 'ApplyTooltip'
-			and rawget(class, name) == nil then
-			class[name] = method
-		end
-	end
-end
-
--- The tooltip methods are opt-in, unlike the identity methods above, because they are not
--- inert on a class that does not want it. RefreshTooltipIfOwned calls
--- self:RefreshTooltip(), which only the two hovering widget classes define -- so
--- applying it to ItemFrame, BagFrame and PageBar planted a method that could only
--- ever raise "attempt to call method 'RefreshTooltip' (a nil value)". Nothing calls
--- it on them today, so it was latent rather than broken, but a handler wired by name
--- (the way Bag:OnShow wires 'Update') is one line away from reaching it.
---
--- Note this is a different case from the unused GetSettings that pageBar.lua's own
--- comment weighs up: an extra accessor nobody calls costs a table slot, while a
--- method that cannot run is a trap. Only the second is worth splitting for.
-function Widget:ApplyTooltip(class)
-	for name, method in pairs(Widget.tooltip) do
+local function CopyMissing(class, methods)
+	for name, method in pairs(methods) do
 		if rawget(class, name) == nil then
 			class[name] = method
 		end
 	end
 end
 
+function Widget:Apply(class)
+	CopyMissing(class, Widget.identity)
+end
+
+-- The tooltip methods are a separate call, taken only by the two classes that
+-- actually hover, because unlike the identity methods they are not inert on a class
+-- that does not want them. RefreshTooltipIfOwned calls self:RefreshTooltip(), which
+-- only those two define -- so applying it to ItemFrame, BagFrame and PageBar planted
+-- a method that could only ever raise "attempt to call method 'RefreshTooltip' (a
+-- nil value)". Nothing calls it on them today, so it was latent rather than broken,
+-- but a handler wired by name (the way Bag:OnShow wires 'Update') is one line away
+-- from reaching it.
+--
+-- Note this is a different case from the unused GetSettings that pageBar.lua's own
+-- comment weighs up: an extra accessor nobody calls costs a table slot, while a
+-- method that cannot run is a trap. Only the second is worth splitting for.
+function Widget:ApplyTooltip(class)
+	CopyMissing(class, Widget.tooltip)
+end
+
 
 --[[ Identity ]]--
+-- Taken by all five widget classes, through Apply above.
 
-function Widget:SetFrameID(frameID)
+Widget.identity = {}
+
+function Widget.identity:SetFrameID(frameID)
 	self.frameID = frameID
 end
 
-function Widget:GetFrameID()
+function Widget.identity:GetFrameID()
 	return self.frameID
 end
 
-function Widget:GetSettings()
+function Widget.identity:GetSettings()
 	return Bagnon.FrameSettings:Get(self:GetFrameID())
 end
 
@@ -272,4 +284,36 @@ function Widget.tooltip:SetTooltipItem(itemId, link)
 	poller.itemId = itemId
 	poller.sinceTick, poller.waited = 0, 0
 	poller:Show()
+end
+
+
+--[[ Item icon ]]--
+
+-- An item's icon, or the placeholder both widget classes draw when the client's item
+-- cache cannot answer for its id yet -- a cold login, mostly. See
+-- docs/non-issues.md §5: this server does not answer bulk item queries, so it is a
+-- real and unfixable-from-Lua state rather than a transient one, and the icon may
+-- resolve at any point afterwards or never. Hovering is what resolves it when
+-- anything does -- SetTooltipItem's single-item query above repaints both icon and
+-- tooltip when the answer lands.
+--
+-- One copy, shared. This was a constant plus the same `GetItemIcon(itemId) or
+-- placeholder` fallback spelled out in both components/item.lua and
+-- components/bag.lua, whose two comments explaining it had already drifted in
+-- wording, and the `?`-pinned-for-the-session bug (see the cache note above
+-- ItemSlot:Update) had to be found and fixed once per file.
+--
+-- A plain function rather than a method, and deliberately not in Widget.identity:
+-- nothing here needs an instance, so the two callers read it off
+-- Bagnon.ExtBankWidget at their own file scope instead of having it stamped onto
+-- every class.
+--
+-- Takes a real itemId only. The two callers disagree about what an ABSENT one means
+-- -- an empty vault cell draws the addon-wide empty-slot texture, an unequipped bag
+-- slot draws bag.lua's own EMPTY_BAG_TEXTURE -- so that branch stays at the call
+-- site rather than being guessed here.
+local UNKNOWN_ITEM_TEXTURE = [[Interface\Icons\INV_Misc_QuestionMark]]
+
+function Widget.ItemTexture(itemId)
+	return GetItemIcon(itemId) or UNKNOWN_ITEM_TEXTURE
 end

@@ -5,6 +5,7 @@
 
 local Bagnon = LibStub('AceAddon-3.0'):GetAddon('Bagnon')
 local ExtBank = Bagnon.ExtBank
+local Widget = Bagnon.ExtBankWidget
 local ItemSlot = Bagnon.Classy:New('Button')
 ItemSlot:Hide()
 Bagnon.ExtBankItemSlot = ItemSlot
@@ -433,11 +434,14 @@ function ItemSlot:DropCarriedItem()
 			-- exactly where it always did.
 			-- Only let go of the cursor if the request actually went out. If the
 			-- client is not answering, DepositToSlot says so and returns false, and
-			-- ClearCursor()ing anyway would drop the item back into the bag as
-			-- though the deposit had been accepted.
+			-- releasing anyway would drop the item back into the bag as though the
+			-- deposit had been accepted.
+			--
+			-- ReleaseCursor (core/cursor.lua), not ClearCursor plus a write to
+			-- cursorSrc here: a bare ClearCursor fires no hook, so the field would
+			-- keep naming this slot after the item left it.
 			if ExtBank:DepositToSlot(src.bag, src.slot, self.bagIndex, self.slot, src.count) then
-				ClearCursor()
-				ExtBank.cursorSrc = nil
+				ExtBank:ReleaseCursor()
 			end
 		end
 		return true
@@ -487,14 +491,6 @@ end
 
 --[[ Update Methods ]]--
 
--- Shown when the client has no cached item data for an itemId yet -- a cold
--- login, mostly. See docs/non-issues.md §5: this server does not answer bulk item
--- queries, so it is a real and unfixable-from-Lua state rather than a transient
--- one, and the icon may resolve at any point afterwards or never. Hovering the
--- cell is what resolves it when anything does -- SetTooltipItem's single-item
--- query (components/widget.lua) repaints icon and tooltip when it answers.
-local UNKNOWN_ITEM_TEXTURE = [[Interface\Icons\INV_Misc_QuestionMark]]
-
 -- ReloadAllItemSlots calls this for every already-built cell on the page -- up to
 -- GetBagsPerPage() x 36, 180 by default -- on every EXTBANK_MODEL_UPDATED, while a
 -- delta packet typically touches one or two cells. So all but a couple of those
@@ -505,9 +501,9 @@ local UNKNOWN_ITEM_TEXTURE = [[Interface\Icons\INV_Misc_QuestionMark]]
 -- The cache is keyed on the RESOLVED values about to be written, not on the cell's
 -- own fields, and that distinction is the whole reason it is safe:
 --
---   * GetItemIcon reads the client's item cache, so for one itemId it can answer
---     nil now (-> UNKNOWN_ITEM_TEXTURE) and the real path later. Keyed on itemId,
---     this would pin the question mark for the rest of the session.
+--   * Widget.ItemTexture reads the client's item cache, so for one itemId it can
+--     answer the placeholder now and the real path later. Keyed on itemId, this
+--     would pin the question mark for the rest of the session.
 --   * GetEmptyItemTexture reads a live addon-wide setting, and
 --     SHOW_EMPTY_ITEM_SLOT_TEXTURE_UPDATE (components/itemFrame.lua) applies a
 --     change to it by calling plain Update() on every cell -- there is nothing
@@ -550,7 +546,7 @@ function ItemSlot:Update()
 	if data then
 		itemId, count = data.itemId, data.count
 		enchant, randomProp = data.enchant, data.randomProp
-		texture = GetItemIcon(itemId) or UNKNOWN_ITEM_TEXTURE
+		texture = Widget.ItemTexture(itemId)
 	else
 		count = 0
 		texture = self:GetEmptyItemTexture()

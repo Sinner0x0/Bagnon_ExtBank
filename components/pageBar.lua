@@ -23,8 +23,8 @@ function PageBar:New(frameID, parent)
 	f:SetFrameID(frameID)
 	f:Hide()
 
-	f:CreatePrevButton()
-	f:CreateNextButton()
+	f.prevButton = f:CreateStepButton('<', -1)
+	f.nextButton = f:CreateStepButton('>', 1)
 	f:CreateText()
 
 	-- Registered unconditionally here, not gated to OnShow/OnHide -- same
@@ -73,33 +73,26 @@ function PageBar:CreateText()
 	return text
 end
 
-function PageBar:CreatePrevButton()
+-- One constructor for both step buttons. They were two 12-line bodies differing in
+-- exactly three tokens ('<'/-1/prevButton against '>'/1/nextButton) -- 28 lines that
+-- had to be edited in pairs, on a widget symmetric enough that a one-sided edit
+-- reads as correct in review.
+--
+-- delta goes straight to ChangePage, which is signed the same way ItemFrame's own
+-- wheel handler is: negative for the earlier page. Update below is what enables and
+-- disables these, and it reaches them by field name off the bar, so New assigns
+-- prevButton/nextButton from the two return values rather than this doing it.
+function PageBar:CreateStepButton(label, delta)
 	local b = CreateFrame('Button', nil, self, 'UIPanelButtonTemplate')
 	b:SetWidth(BUTTON_WIDTH)
 	b:SetHeight(BUTTON_HEIGHT)
-	b:SetText('<')
+	b:SetText(label)
 
 	local bar = self
 	b:SetScript('OnClick', function()
-		bar:ChangePage(-1)
+		bar:ChangePage(delta)
 	end)
 
-	self.prevButton = b
-	return b
-end
-
-function PageBar:CreateNextButton()
-	local b = CreateFrame('Button', nil, self, 'UIPanelButtonTemplate')
-	b:SetWidth(BUTTON_WIDTH)
-	b:SetHeight(BUTTON_HEIGHT)
-	b:SetText('>')
-
-	local bar = self
-	b:SetScript('OnClick', function()
-		bar:ChangePage(1)
-	end)
-
-	self.nextButton = b
 	return b
 end
 
