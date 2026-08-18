@@ -185,17 +185,21 @@ function ExtBank:ParsePacket(hex)
 		if itemId == 0 then
 			self.cells[bi][slot] = nil
 		else
-			-- `bi >= 0` bounds the DEPOSIT side only, not the parse. A cell record
-			-- naming a bag below CONTENT_BASE yields a negative bagIndex, which the
-			-- mirrored original tolerates harmlessly -- it only ever reads
-			-- cells[activeBag] with activeBag >= 0, so a stray cells[-1] just sits
-			-- there. Ours is not inert: core/deposit.lua would find bag -1 off-page
-			-- (it can never be on one), spend an arm, and send a MoveWithinVault whose
-			-- source resolves back to CONTENT_BASE + -1 = 19, the bag-slot strip. So
+			-- The range check bounds the DEPOSIT side only, not the parse. `bag` is
+			-- an unsigned byte, so bi = bag - CONTENT_BASE spans -20..235 while only
+			-- 0..MAX_BAGS-1 name a bag that can exist. Either end the mirrored
+			-- original tolerates harmlessly -- it only ever reads cells[activeBag]
+			-- for a bag it already knows about, so a stray cells[-1] or cells[235]
+			-- just sits there. Ours is not inert: core/deposit.lua would find that
+			-- bag off-page (it can never be on one -- BagFrame:CreateBagSlots only
+			-- builds buttons for 0..MAX_BAGS-1), spend an arm, and send a
+			-- MoveWithinVault whose source resolves back to CONTENT_BASE + bi. Both
+			-- ends land on something real: bi = -1 gives 19, the bag-slot strip;
+			-- bi = 234 and 235 give the AUTO_INV and first-free-vault sentinels. So
 			-- the guard goes on the `gained` push, where the exposure actually is,
 			-- rather than on the assignment below -- which stays byte-for-byte with
 			-- extBank.lua per the mirroring policy (docs/non-issues.md §2).
-			if watchingDeposits and bi >= 0 then
+			if watchingDeposits and bi >= 0 and bi < self.MAX_BAGS then
 				-- Newly occupied, occupied by a DIFFERENT item than before, or
 				-- an existing stack that grew. A right-click deposit can land
 				-- as any of the three, and that last one -- merging into a
