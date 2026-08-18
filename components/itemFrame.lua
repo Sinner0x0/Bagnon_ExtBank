@@ -245,13 +245,29 @@ end
 -- convention as the page bar's own prev/next buttons (see pageBar.lua),
 -- wheel-up meaning "earlier page" the way scrolling up means "earlier
 -- content" everywhere else in the client.
--- Paging cancels any outstanding pick, here and in PageBar:ChangePage. The grid
--- re-flows under the player, so a pick armed against the old page would complete
--- itself onto whatever cell now occupies that spot -- and being invisible, it would
--- do so with no hint that a stale gesture was involved.
+--
+-- Paging deliberately does NOT cancel an outstanding pick, here or in
+-- PageBar:ChangePage, and both used to -- which silently removed the reason the
+-- pick and the paging exist together. Pick up an item on page 1, page to page 3,
+-- click an empty cell: that cross-page move is the mechanic, and clearing on the
+-- page step made the second click re-arm a fresh pick instead of completing the
+-- move. Within one page the player can see both cells at once and drag.
+--
+-- The reasoning the clear carried -- "the grid re-flows, so the pick would
+-- complete itself onto whatever cell now occupies that spot" -- confuses a screen
+-- position with a vault address. pickSrc is { bagIndex, slot }, absolute
+-- coordinates the server understands; paging changes only which cells are
+-- rendered, never what those coordinates name. And the destination is not the
+-- spot the origin used to sit in, it is whatever cell the player actually clicks,
+-- read off that cell's own bagIndex/slot in DropCarriedItem. So there was no
+-- re-flow hazard to fix.
+--
+-- What paging does cost is the cue: ItemSlot:UpdatePicked highlights the ORIGIN
+-- cell, which is off-screen once you page away, so a pick abandoned mid-move is
+-- invisible again until you page back. That is the real half of the concern, and
+-- it is not worth paying for with the feature -- Frame:OnHide still clears on
+-- every close path, so the state cannot outlive the window. See non-issues.md §13.
 function ItemFrame:OnMouseWheel(delta)
-	ExtBank:ClearPick()
-
 	if delta > 0 then
 		self:SetCurrentPage(self:GetCurrentPage() - 1)
 	else

@@ -119,11 +119,11 @@ end
 -- at the same ItemFrame:SetCurrentPage, which clamps and no-ops at either
 -- end, so there's no separate bounds-checking needed here.
 
+-- An outstanding in-vault pick deliberately survives the page step -- carrying one
+-- across pages is the whole point of having both. This used to ClearPick() here,
+-- which broke that; see ItemFrame:OnMouseWheel for why the re-flow argument behind
+-- it did not hold.
 function PageBar:ChangePage(delta)
-	-- Same reason ItemFrame:OnMouseWheel does it: the grid re-flows, so an
-	-- outstanding in-vault pick would land on whatever cell takes that spot.
-	Bagnon.ExtBank:ClearPick()
-
 	local itemFrame = self:GetItemFrame()
 	if itemFrame then
 		itemFrame:SetCurrentPage(itemFrame:GetCurrentPage() + delta)

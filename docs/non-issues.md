@@ -585,13 +585,28 @@ exists. Cursor payloads are not something Lua can synthesise on 3.3.5a.
 What *was* addressed is the consequence rather than the cause: the origin cell now
 carries a highlight for as long as a pick is outstanding (`ItemSlot:UpdatePicked`,
 driven by `EXTBANK_PICK_CHANGED`), a right-click always means "withdraw" instead of
-being spent completing a forgotten move, and the pick is cleared by the bag strip,
-the page bar and the mouse wheel as well as by the cell paths and `Frame:OnHide`. So
-the state is visible and short-lived even though it is not on the cursor.
+being spent completing a forgotten move, and the pick is cleared by the bag strip as
+well as by the cell paths and `Frame:OnHide`. So the state is visible and short-lived
+even though it is not on the cursor.
+
+**Not cleared by paging, and that is deliberate.** The page bar and the mouse wheel
+briefly did clear it, on the reasoning that a re-flowed grid would let the pick
+complete itself onto whatever cell took the origin's spot. That reasoning is wrong —
+`pickSrc` holds absolute `{ bagIndex, slot }` coordinates, and the destination is read
+off the cell the player actually clicks — and the clear removed the addon's
+cross-page move outright: pick on page 1, page across, click to place. Reverted; see
+`ItemFrame:OnMouseWheel`.
+
+**Known gap.** The highlight sits on the origin cell, so paging away leaves an
+outstanding pick with no on-screen cue until the player pages back — `ItemSlot:OnShow`
+re-runs `UpdatePicked` against the live `pickSrc`, so it returns with the cell rather
+than needing an arm or clear to repaint it. `Frame:OnHide` still bounds the pick to
+the life of the window.
 
 **Reopen if:** a client-side way to load the cursor from a non-container address
 appears, or the highlight proves insufficient in practice — a player reporting a move
-they did not intend would be the signal, and the fix would be to require the second
-click on the *same* cell to confirm rather than to complete.
+they did not intend would be the signal. The fix would be a cue that survives paging
+(the page bar naming the carried item, say), **not** clearing the pick on the page
+step, which has now been tried and cost the feature.
 
 *Entries 12 and 13 dispositioned 2026-08-17 alongside the correctness pass.*
