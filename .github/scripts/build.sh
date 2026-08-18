@@ -23,9 +23,19 @@ ADDON="Bagnon_ExtBank"
 TOC="$ADDON.toc"
 
 # --- version ----------------------------------------------------------------
-# The .toc is the single source of truth. tr strips the CR from CRLF endings,
-# which .toc files edited on Windows will have.
-VERSION="$(grep -m1 '^## Version:' "$TOC" | sed 's/^## Version:[[:space:]]*//' | tr -d '\r')"
+# The .toc is the single source of truth, and this is deliberately the SAME
+# expression as stamp-version.sh's toc_field -- keep the two identical. The
+# version read here becomes the zip name and the release tag, while
+# stamp-version.sh --check is what CI compares against main.lua, so two parsers
+# that disagree about the same line ship a tag nothing verified: an earlier
+# version took everything after the colon, which let a trailing space through
+# into `v1.0.0 ` while --check compared the trimmed token and passed.
+#
+# The value is the first run of non-space characters, so anything after the
+# number (a trailing space, an inline note) is dropped rather than carried. That
+# also drops the CR from the CRLF endings a .toc edited on Windows will have --
+# CR is whitespace to POSIX character classes -- so no separate tr is needed.
+VERSION="$(sed -n 's/^## Version:[[:space:]]*\([^[:space:]][^[:space:]]*\).*$/\1/p' "$TOC" | head -1)"
 [ -n "$VERSION" ] || { echo "::error::could not read '## Version:' from $TOC"; exit 1; }
 
 # --- work out what ships ----------------------------------------------------
